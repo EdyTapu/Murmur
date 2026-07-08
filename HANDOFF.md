@@ -47,11 +47,16 @@ The app is signed with a **stable self-signed identity "Murmur Dev Signing"** (i
 This is what makes TCC permission grants (Accessibility, Microphone) **survive rebuilds** - ad-hoc signing (`-`) changes the identity every build and silently invalidates grants.
 `app/build.sh` auto-detects the identity and uses it; falls back to ad-hoc if missing.
 
+It is signed with the **hardened runtime** (`--options runtime`) plus `app/Murmur.entitlements`.
+The entitlements are **mandatory, not optional**: under the hardened runtime, microphone access requires `com.apple.security.device.audio-input`. Without it macOS denies the mic *at the runtime layer* and **never shows the permission prompt at all** - `requestAccess` returns immediately, recording captures pure silence, and the app never appears in System Settings → Privacy → Microphone. (We also grant `com.apple.security.automation.apple-events` for the AppleScript-keystroke insertion fallback.) Verified via `tccd` logs: with the entitlement, `tccd` reaches `AUTHREQ_PROMPTING` for `kTCCServiceMicrophone`; without it, it never does.
+
+Because the project lives under iCloud-synced `~/Desktop/Claude`, iCloud leaves `* 2.app` duplicate bundles and re-stamps `com.apple.FinderInfo` xattrs that break `codesign --strict`. `build.sh` now sweeps the duplicates and runs `xattr -cr` before signing.
+
 Required permissions:
 - **Accessibility** - the real gate. Needed for the CGEventTap (hotkey) AND for AX/paste insertion. Onboarding blocks "Done" only on this.
 - **Microphone** - needed to record. Audio never leaves the device.
 
-Gotcha we hit: when launching Murmur **from a terminal** (`./build/.../Murmur`), macOS attributes mic access to the *terminal's* TCC grant, so `authorizationStatus` reads `.authorized` but **Murmur never appears in the Microphone list**. Launched **standalone** (`open Murmur.app` / double-click), it registers its own entry and prompts normally. This is a dev-launch artifact, not a bug. Onboarding therefore does not gate on the mic grant.
+Gotcha we hit (and the real root cause of "mic never prompts / not in the list"): the missing `audio-input` entitlement above. It was *misdiagnosed* earlier as a Terminal-attribution artifact (launching from a terminal can make macOS credit the terminal's mic grant), but the actual cause was the hardened runtime blocking the mic with no entitlement. With the entitlement present, the prompt fires normally whether launched via `open Murmur.app` or double-click. Onboarding still gates "Done" on Accessibility only (the mic circle is also a manual override), but with the fix the real mic grant now works, so the override should not be needed.
 
 If a grant ever wedges during development:
 ```
