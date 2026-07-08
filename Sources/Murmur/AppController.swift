@@ -45,6 +45,8 @@ final class AppController: ObservableObject {
 
     func start() {
         axTrusted = AXIsProcessTrusted()
+        let rawStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        log.info("Launch: mic authorizationStatus=\(rawStatus.rawValue, privacy: .public), axTrusted=\(self.axTrusted, privacy: .public)")
         refreshMicStatus()
         if micGranted {
             Task { await recorder.warmUp() }
@@ -326,6 +328,26 @@ final class AppController: ObservableObject {
         let duration = Double(samples.count) / 16_000
         guard duration > 0.25 else {
             hud.hide()
+            return
+        }
+
+        // If the buffer is essentially pure silence, recording ran but the mic
+        // delivered nothing - almost always a missing real permission (e.g. the
+        // onboarding was clicked through without the OS grant). Say so plainly
+        // instead of the vague "didn't catch that".
+        let peak = samples.reduce(Float(0)) { max($0, abs($1)) }
+        let realStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        log.info("Dictation: \(duration, privacy: .public)s captured, peak=\(peak, privacy: .public), micStatus=\(realStatus.rawValue, privacy: .public)")
+        if peak < 0.0005 {
+            if realStatus != .authorized {
+                hud.showResult(
+                    success: false,
+                    message: "No mic signal - grant Microphone in System Settings",
+                    autoHideAfter: 3.0)
+                openPrivacyPane("Privacy_Microphone")
+            } else {
+                hud.showResult(success: false, message: "No sound detected - check your mic input")
+            }
             return
         }
 
