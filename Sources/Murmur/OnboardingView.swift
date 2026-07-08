@@ -15,7 +15,7 @@ struct OnboardingView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     PermissionRow(
                         title: "Microphone",
-                        detail: "Needed to hear you. Audio never leaves this Mac.",
+                        detail: "Needed to hear you. Audio never leaves this Mac. On first standalone launch macOS will prompt; you can also enable Murmur under Privacy \u{203A} Microphone.",
                         granted: controller.micGranted,
                         action: { controller.requestMicAccess() }
                     )
@@ -50,6 +50,12 @@ struct OnboardingView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            if !controller.axTrusted {
+                Text("Accessibility is required for the hotkey and typing. Grant it above, then this closes.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
             HStack {
                 Spacer()
                 Button("Done") {
@@ -57,7 +63,9 @@ struct OnboardingView: View {
                     AppShared.onboarding.close()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!controller.micGranted || !controller.axTrusted)
+                // Only Accessibility is truly required to gate on; the mic grant
+                // can read as "inherited" during development, so don't block on it.
+                .disabled(!controller.axTrusted)
             }
         }
         .padding(24)

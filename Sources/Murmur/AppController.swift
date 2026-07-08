@@ -60,6 +60,18 @@ final class AppController: ObservableObject {
         hotkey.onKeyUp = { [weak self] in self?.hotkeyUp() }
         hotkey.start(choice: Prefs.hotkey)
 
+        // Proactively fire the mic prompt on first launch so the system dialog
+        // appears (and the app registers in the Microphone privacy list) without
+        // the user having to find a button.
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                Task { @MainActor in
+                    self?.micGranted = granted
+                    if granted { await self?.recorder.warmUp() }
+                }
+            }
+        }
+
         Task { await self.loadModels() }
         pollPermissionsUntilGranted()
     }
@@ -79,15 +91,27 @@ final class AppController: ObservableObject {
     // MARK: - Permissions
 
     func refreshMicStatus() {
-        micGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        micGranted = status == .authorized
+        NSLog("Murmur: mic authorizationStatus rawValue=%d (0=notDet 1=restricted 2=denied 3=authorized)", status.rawValue)
     }
 
     func requestMicAccess() {
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        // The system prompt only appears from `.notDetermined`. In any other
+        // state (previously denied, or reset races) send the user straight to
+        // the Microphone pane so the button is never a no-op.
+        guard status == .notDetermined else {
+            openPrivacyPane("Privacy_Microphone")
+            return
+        }
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
             Task { @MainActor in
                 self?.micGranted = granted
                 if granted {
                     await self?.recorder.warmUp()
+                } else {
+                    self?.openPrivacyPane("Privacy_Microphone")
                 }
             }
         }
@@ -96,6 +120,16 @@ final class AppController: ObservableObject {
     func requestAXTrust() {
         let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         axTrusted = AXIsProcessTrustedWithOptions(options)
+        if !axTrusted {
+            openPrivacyPane("Privacy_Accessibility")
+        }
+    }
+
+    func openPrivacyPane(_ anchor: String) {
+        if let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     /// Permissions granted in System Settings don't notify us; poll briefly.

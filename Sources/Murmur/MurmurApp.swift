@@ -44,14 +44,19 @@ enum AppShared {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSLog("Murmur: applicationDidFinishLaunching")
         Task { @MainActor in
             let controller = AppShared.controller
             controller.start()
+            NSLog(
+                "Murmur: started (mic=%d ax=%d)", controller.micGranted ? 1 : 0,
+                controller.axTrusted ? 1 : 0)
             let needsOnboarding =
                 !UserDefaults.standard.bool(forKey: PrefKey.onboardingDone)
                 || !controller.micGranted || !controller.axTrusted
             if needsOnboarding {
                 AppShared.onboarding.show(controller: controller)
+                NSLog("Murmur: onboarding window shown")
             }
         }
     }
