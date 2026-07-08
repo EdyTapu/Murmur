@@ -15,9 +15,10 @@ struct OnboardingView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     PermissionRow(
                         title: "Microphone",
-                        detail: "Needed to hear you. Audio never leaves this Mac. On first standalone launch macOS will prompt; you can also enable Murmur under Privacy \u{203A} Microphone.",
+                        detail: "Needed to hear you. Audio never leaves this Mac. If no prompt appears, click the circle to continue - dictation still works.",
                         granted: controller.micGranted,
-                        action: { controller.requestMicAccess() }
+                        action: { controller.requestMicAccess() },
+                        onToggleCircle: { controller.assumeMicGranted() }
                     )
                     PermissionRow(
                         title: "Accessibility",
@@ -99,12 +100,16 @@ struct PermissionRow: View {
     let detail: String
     let granted: Bool
     let action: () -> Void
+    var onToggleCircle: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top) {
             Image(systemName: granted ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(granted ? .green : .secondary)
                 .font(.title3)
+                .contentShape(Circle())
+                .onTapGesture { onToggleCircle?() }
+                .help(onToggleCircle == nil ? "" : "Click to mark as enabled")
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).fontWeight(.semibold)
                 Text(detail).font(.caption).foregroundStyle(.secondary)

@@ -90,10 +90,25 @@ final class AppController: ObservableObject {
 
     // MARK: - Permissions
 
+    /// Set when the user clicks the mic circle to say "trust me, it works" -
+    /// keeps the 2s status poll from flipping the UI back to ungranted.
+    private var micAssumedGranted = false
+
     func refreshMicStatus() {
+        if micAssumedGranted {
+            micGranted = true
+            return
+        }
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         micGranted = status == .authorized
-        NSLog("Murmur: mic authorizationStatus rawValue=%d (0=notDet 1=restricted 2=denied 3=authorized)", status.rawValue)
+    }
+
+    /// User override: mark the mic as granted and warm the engine.
+    /// The real OS grant may be inherited (dev launch), so this just unblocks the UI.
+    func assumeMicGranted() {
+        micAssumedGranted = true
+        micGranted = true
+        Task { await recorder.warmUp() }
     }
 
     func requestMicAccess() {
