@@ -28,6 +28,8 @@
 	<string>26.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Murmur uses the camera during eye-control sessions to estimate where you're looking. Video is processed on-device and never leaves this Mac.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Murmur listens while you hold the dictation key so it can transcribe your speech on-device. Audio never leaves this Mac.</string>
 	<key>NSAppleEventsUsageDescription</key>

@@ -7,6 +7,8 @@ Status as of 2026-07-07: **working end-to-end, verified by the user** (fn-hold d
 Build is clean, 16/16 unit tests pass.
 2026-07-12: fixed "holding fn does nothing" - hotkey event tap moved to a dedicated thread with a watchdog, active-tap fallback for the silent Input Monitoring rejection, and the audio engine restart moved off the main thread (details in Architecture + the permissions gotchas).
 2026-07-12: added the Wispr-Flow-style dashboard window (Home stats, History, Scratchpad, Dictionary, Snippets, Settings), screenshot-verified; opening the app now shows it.
+2026-07-23: added **eye control v1** (⌃⌥E): look where you want the cursor, deliberate blink to click, 9-point calibration overlay, snap-to-window/Dock targets.
+Built + 26/26 tests green; the live camera loop still needs its first user-granted Camera permission run (see Eye control section).
 
 ## Run it
 
@@ -53,6 +55,26 @@ Pipeline: hotkey → record → transcribe → clean → insert → history.
 - `SettingsView` - the classic tabbed Settings scene (Cmd+,): General (hotkey, silence, sounds, launch-at-login via `SMAppService`), Cleanup (fillers, AI polish, per-app tones), Dictionary, Snippets.
   The dashboard reuses the same `GeneralSettings`/`CleanupSettings`/`DictionarySettings`/`SnippetSettings` views.
 - `MurmurCLI` (`swift run murmur-cli file.wav`) - headless harness that runs the exact same STT stack; used for latency/pipeline verification without the GUI.
+
+## Eye control (v1, 2026-07-23)
+
+Press **⌃⌥E** to toggle an eye-control session: the cursor follows your gaze, a deliberate blink (~0.3s hold, natural blinks ignored) clicks.
+First session shows a fullscreen 9-point calibration overlay (esc cancels); the calibration persists in UserDefaults, "Recalibrate Eye Control…" in the menu redoes it.
+Clicks snap to the nearest window title bar or Dock icon within a configurable radius (Settings → Eye), which is what makes coarse webcam gaze reliable for app switching.
+
+One-time setup: `zsh app/setup_gaze.sh` installs a Python venv with MediaPipe (~600 MB) into `~/Library/Application Support/Murmur/gaze-env` plus the `face_landmarker.task` model next to it.
+Already done on this Mac (2026-07-23, anaconda python 3.12).
+
+Architecture (all new code in `Sources/Murmur/Gaze/`):
+
+- **Murmur owns the camera** (`GazeCamera`, AVCaptureSession 640x480 BGRA @15fps) so the Camera TCC grant, the `com.apple.security.device.camera` entitlement, and the green light all belong to Murmur.app - the same hardened-runtime recipe as the mic (see below).
+- `app/gaze_helper.py` (bundled into Resources) is a **pure stdin→stdout child**: raw BGRA frames in, one JSON line of features out (iris-in-eye-box offsets, head pose matrix angles + translation, eye aspect ratios). No camera, no network, no TCC of its own. MediaPipe's legacy `solutions` API is GONE in 0.10.35 - it uses the Tasks `FaceLandmarker` (VIDEO mode, needs the `.task` model path as argv).
+- `GazeHelperProcess` spawns the venv python, drops frames when >2 are in flight (backpressure), drains stderr (glog chatter would otherwise fill the pipe and hang the child).
+- `GazeMapper` - ridge regression from the 10-dim features (+ quadratic iris terms) to normalized screen coords; features are standardized per-column first (iris ~0.1 vs head translation ~tens of cm). Fitted from the 9-point calibration, persisted via `GazeCalibration` (mapper + target screen rect in CG coords).
+- `OneEuroFilter` smooths the cursor; `BlinkDetector` turns EAR into deliberate-blink events with an adaptive open-eye baseline + hysteresis; clicks land where the user looked ~120ms *before* the eyelids started moving (positions ring buffer).
+- `GazeController` - session state machine, Carbon `RegisterEventHotKey` for ⌃⌥E (system-wide, consumes the key, no event tap → can't interfere with the dictation tap), calibration driving, cursor posting via CGEvents, snap-target discovery (CGWindowList title bars + Dock icons via AX).
+
+Known v1 limits: single screen (the one calibrated on); recalibrate if you move your laptop or slouch differently; Continuity Camera iPhones may be picked over the built-in camera if active; physical mouse use during a session fights the gaze cursor (stop the session to mouse normally).
 
 ## Signing & permissions (IMPORTANT)
 

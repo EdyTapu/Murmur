@@ -16,6 +16,11 @@ enum PrefKey {
     static let preferAXInsertion = "preferAXInsertion"
     static let soundFeedback = "soundFeedback"
     static let onboardingDone = "onboardingDone"
+    static let gazeBlinkClick = "gazeBlinkClick"
+    static let gazeBlinkHold = "gazeBlinkHold"
+    static let gazeSnap = "gazeSnap"
+    static let gazeSnapRadius = "gazeSnapRadius"
+    static let gazeCalibrationData = "gazeCalibrationData"
 }
 
 enum HotkeyChoice: String, CaseIterable, Identifiable {
@@ -109,6 +114,20 @@ struct Prefs {
     }
     static var soundFeedback: Bool {
         defaults.object(forKey: PrefKey.soundFeedback) as? Bool ?? true
+    }
+    static var gazeBlinkClick: Bool {
+        defaults.object(forKey: PrefKey.gazeBlinkClick) as? Bool ?? true
+    }
+    static var gazeBlinkHold: Double {
+        let v = defaults.double(forKey: PrefKey.gazeBlinkHold)
+        return v > 0 ? v : 0.3
+    }
+    static var gazeSnap: Bool {
+        defaults.object(forKey: PrefKey.gazeSnap) as? Bool ?? true
+    }
+    static var gazeSnapRadius: Double {
+        let v = defaults.double(forKey: PrefKey.gazeSnapRadius)
+        return v > 0 ? v : 150
     }
 
     static func tone(for category: AppCategory) -> Tone {

@@ -1,0 +1,99 @@
+@preconcurrency import AVFoundation
+import Foundation
+import os
+
+/// Owns the webcam during an eye-control session: 640x480 BGRA at ~15 fps,
+/// delivered as raw frames for the gaze helper. Capture lives in Murmur (not
+/// the Python child) so the camera permission, the entitlement, and the
+/// green camera light all belong to Murmur.app - same TCC recipe as the mic.
+final class GazeCamera: NSObject, @unchecked Sendable {
+    private static let log = Logger(subsystem: "com.alessio.murmur", category: "gaze-camera")
+
+    /// Called on the capture queue with (width, height, bytesPerRow, BGRA pixels).
+    var onFrame: (@Sendable (Int, Int, Int, Data) -> Void)?
+
+    private let session = AVCaptureSession()
+    private let queue = DispatchQueue(label: "com.alessio.murmur.gaze-camera")
+    private var configured = false
+
+    static var authorized: Bool {
+        AVCaptureDevice.authorizationStatus(for: .video) == .authorized
+    }
+
+    /// Start capture off the main thread (`startRunning` blocks).
+    func start() throws {
+        try configureIfNeeded()
+        queue.async { [session] in
+            if !session.isRunning { session.startRunning() }
+        }
+    }
+
+    func stop() {
+        queue.async { [session] in
+            if session.isRunning { session.stopRunning() }
+        }
+    }
+
+    private func configureIfNeeded() throws {
+        guard !configured else { return }
+        guard let device = AVCaptureDevice.default(for: .video) else {
+            throw NSError(
+                domain: "Murmur", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "No camera found"])
+        }
+        session.beginConfiguration()
+        session.sessionPreset = .vga640x480
+
+        let input = try AVCaptureDeviceInput(device: device)
+        guard session.canAddInput(input) else {
+            session.commitConfiguration()
+            throw NSError(
+                domain: "Murmur", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Camera input rejected"])
+        }
+        session.addInput(input)
+
+        let output = AVCaptureVideoDataOutput()
+        output.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        output.alwaysDiscardsLateVideoFrames = true
+        output.setSampleBufferDelegate(self, queue: queue)
+        guard session.canAddOutput(output) else {
+            session.commitConfiguration()
+            throw NSError(
+                domain: "Murmur", code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "Camera output rejected"])
+        }
+        session.addOutput(output)
+        session.commitConfiguration()
+
+        // ~15 fps is plenty for gaze and keeps CPU + pipe traffic low.
+        if (try? device.lockForConfiguration()) != nil {
+            device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 15)
+            device.unlockForConfiguration()
+        }
+        configured = true
+        Self.log.info("camera configured: \(device.localizedName, privacy: .public)")
+    }
+}
+
+extension GazeCamera: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard let onFrame,
+            let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
+        else { return }
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        onFrame(
+            CVPixelBufferGetWidth(pixelBuffer), height, bytesPerRow,
+            Data(bytes: base, count: bytesPerRow * height))
+    }
+}

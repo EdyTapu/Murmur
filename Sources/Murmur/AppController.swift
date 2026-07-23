@@ -22,6 +22,7 @@ final class AppController: ObservableObject {
     let history = HistoryStore()
     let dictionary = DictionaryStore()
     let hud = HUDController()
+    let gaze = GazeController()
 
     private let recorder = AudioRecorder()
     private let transcriber = Transcriber()
@@ -61,6 +62,11 @@ final class AppController: ObservableObject {
         hotkey.onKeyDown = { [weak self] in self?.hotkeyDown() }
         hotkey.onKeyUp = { [weak self] in self?.hotkeyUp() }
         hotkey.start(choice: Prefs.hotkey)
+
+        gaze.toast = { [weak self] success, message in
+            self?.hud.showResult(success: success, message: message)
+        }
+        gaze.registerHotkey()
 
         // Proactively fire the mic prompt on first launch so the system dialog
         // appears (and the app registers in the Microphone privacy list) without

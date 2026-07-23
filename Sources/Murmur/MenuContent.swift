@@ -12,6 +12,14 @@ struct MenuContent: View {
             }
             .disabled(!controller.isReady && !isRecording)
             Divider()
+            Button(gazeTitle) {
+                controller.gaze.toggle()
+            }
+            Button("Recalibrate Eye Control…") {
+                controller.gaze.recalibrate()
+            }
+            .disabled(!controller.gaze.isInstalled)
+            Divider()
             Button("Open Murmur") {
                 AppShared.mainWindow.show()
             }
@@ -38,6 +46,11 @@ struct MenuContent: View {
 
     private var handsFreeTitle: String {
         isRecording ? "Stop Dictation" : "Start Hands-Free Dictation"
+    }
+
+    private var gazeTitle: String {
+        controller.gaze.state == .off
+            ? "Start Eye Control (⌃⌥E)" : "Stop Eye Control (⌃⌥E)"
     }
 
     @ViewBuilder

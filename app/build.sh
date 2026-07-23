@@ -25,6 +25,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/app/Info.plist" "$APP/Contents/Info.plist"
 cp "$BIN" "$APP/Contents/MacOS/Murmur"
 cp "$ROOT/app/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$ROOT/app/gaze_helper.py" "$APP/Contents/Resources/gaze_helper.py"
 
 # Strip any inherited extended attributes so the signature verifies strictly.
 xattr -cr "$APP" 2>/dev/null || true

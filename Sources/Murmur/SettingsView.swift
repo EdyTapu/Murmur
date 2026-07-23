@@ -10,6 +10,8 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             CleanupSettings()
                 .tabItem { Label("Cleanup", systemImage: "wand.and.stars") }
+            GazeSettings(controller: controller)
+                .tabItem { Label("Eye", systemImage: "eye") }
             DictionarySettings(store: controller.dictionary)
                 .tabItem { Label("Dictionary", systemImage: "character.book.closed") }
             SnippetSettings(store: controller.dictionary)
@@ -120,6 +122,79 @@ struct CleanupSettings: View {
                 Picker("Everything else:", selection: $toneOther) {
                     ForEach(Tone.allCases) { Text($0.label).tag($0.rawValue) }
                 }
+            }
+        }
+        .padding(20)
+    }
+}
+
+// MARK: - Eye control
+
+struct GazeSettings: View {
+    @ObservedObject var controller: AppController
+    @ObservedObject var gaze: GazeController
+    @AppStorage(PrefKey.gazeBlinkClick) private var blinkClick = true
+    @AppStorage(PrefKey.gazeBlinkHold) private var blinkHold = 0.3
+    @AppStorage(PrefKey.gazeSnap) private var snap = true
+    @AppStorage(PrefKey.gazeSnapRadius) private var snapRadius = 150.0
+
+    init(controller: AppController) {
+        self.controller = controller
+        self.gaze = controller.gaze
+    }
+
+    var body: some View {
+        Form {
+            if gaze.isInstalled {
+                LabeledContent("Status:") {
+                    Text(gaze.statusText)
+                        .foregroundStyle(gaze.state == .off ? .secondary : Color.green)
+                }
+                Text("Press ⌃⌥E to start or stop an eye-control session. Look where you want the cursor; a deliberate blink clicks.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack {
+                    Button(gaze.state == .off ? "Start Eye Control" : "Stop Eye Control") {
+                        gaze.toggle()
+                    }
+                    Button(gaze.isCalibrated ? "Recalibrate…" : "Calibrate…") {
+                        gaze.recalibrate()
+                    }
+                }
+
+                Divider()
+
+                Toggle("Blink to click", isOn: $blinkClick)
+                if blinkClick {
+                    Slider(value: $blinkHold, in: 0.2...0.7, step: 0.05) {
+                        Text("Blink hold: \(blinkHold, specifier: "%.2f")s")
+                    }
+                    Text("Hold your eyes closed this long to click; quick natural blinks are ignored.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Toggle("Snap clicks to windows and Dock icons", isOn: $snap)
+                if snap {
+                    Slider(value: $snapRadius, in: 60...260, step: 10) {
+                        Text("Snap radius: \(Int(snapRadius))px")
+                    }
+                }
+            } else {
+                Text("Eye control isn't set up yet")
+                    .fontWeight(.medium)
+                Text("Run this once in the Murmur folder, then relaunch Murmur:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("zsh app/setup_gaze.sh")
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(6)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                Text("It installs the on-device MediaPipe eye tracker (~600 MB, Python) into Application Support. Video never leaves this Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(20)

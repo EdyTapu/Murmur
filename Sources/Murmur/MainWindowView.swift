@@ -345,6 +345,13 @@ struct SettingsSection: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 16)
                 CleanupSettings()
+                Divider()
+                    .padding(.horizontal, 20)
+                Text("Eye Control")
+                    .font(.title3.bold())
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+                GazeSettings(controller: controller)
             }
             .frame(maxWidth: 560, alignment: .leading)
             .frame(maxWidth: .infinity)
