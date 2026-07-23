@@ -10,15 +10,19 @@ struct BlinkDetector {
     var minHold: TimeInterval
     var maxHold: TimeInterval
 
-    private var baseline = 0.26
+    private var baseline: Double
     private var closedSince: TimeInterval?
     private(set) var isClosed = false
     /// When the eyes last transitioned to closed (valid while `isClosed`).
     var closedAt: TimeInterval? { closedSince }
 
-    init(minHold: TimeInterval = 0.3, maxHold: TimeInterval = 1.2) {
+    /// `baseline` seeds the open-eye EAR estimate; pass the median open EAR
+    /// measured during calibration so the very first blinks of a session
+    /// already use this person's eye shape instead of a generic default.
+    init(minHold: TimeInterval = 0.3, maxHold: TimeInterval = 1.2, baseline: Double = 0.26) {
         self.minHold = minHold
         self.maxHold = maxHold
+        self.baseline = baseline
     }
 
     /// Feed one EAR observation; returns true when a deliberate blink

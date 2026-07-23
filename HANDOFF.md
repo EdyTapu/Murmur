@@ -8,7 +8,7 @@ Build is clean, 16/16 unit tests pass.
 2026-07-12: fixed "holding fn does nothing" - hotkey event tap moved to a dedicated thread with a watchdog, active-tap fallback for the silent Input Monitoring rejection, and the audio engine restart moved off the main thread (details in Architecture + the permissions gotchas).
 2026-07-12: added the Wispr-Flow-style dashboard window (Home stats, History, Scratchpad, Dictionary, Snippets, Settings), screenshot-verified; opening the app now shows it.
 2026-07-23: added **eye control v1** (⌃⌥E): look where you want the cursor, deliberate blink to click, 9-point calibration overlay, snap-to-window/Dock targets.
-Built + 26/26 tests green; the live camera loop still needs its first user-granted Camera permission run (see Eye control section).
+Built + 27/27 tests green; the live camera loop still needs its first user-granted Camera permission run (see Eye control section).
 
 ## Run it
 
@@ -59,7 +59,10 @@ Pipeline: hotkey → record → transcribe → clean → insert → history.
 ## Eye control (v1, 2026-07-23)
 
 Press **⌃⌥E** to toggle an eye-control session: the cursor follows your gaze, a deliberate blink (~0.3s hold, natural blinks ignored) clicks.
-First session shows a fullscreen 9-point calibration overlay (esc cancels); the calibration persists in UserDefaults, "Recalibrate Eye Control…" in the menu redoes it.
+First session shows a fullscreen 9-point calibration overlay (esc cancels); the calibration persists in UserDefaults.
+Calibration is **user-paced and blink-confirmed** (2026-07-23 v1.1): each dot buffers gaze samples, then waits for a deliberate blink and captures the samples from just before the eyelids moved - nothing advances until the user blinks, and the flow doubles as blink-click practice.
+The median open-eye EAR measured during calibration is stored (`GazeCalibration.openEAR`) and seeds the session `BlinkDetector`, so blink-to-click works from the first blink even for narrow or wide eye shapes.
+Recalibrate from the dashboard **Home page card** (Start/Stop + Recalibrate buttons), the menu-bar "Recalibrate Eye Control…", or Settings → Eye.
 Clicks snap to the nearest window title bar or Dock icon within a configurable radius (Settings → Eye), which is what makes coarse webcam gaze reliable for app switching.
 
 One-time setup: `zsh app/setup_gaze.sh` installs a Python venv with MediaPipe (~600 MB) into `~/Library/Application Support/Murmur/gaze-env` plus the `face_landmarker.task` model next to it.

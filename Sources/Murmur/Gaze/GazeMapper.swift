@@ -120,6 +120,9 @@ struct GazeMapper: Codable, Equatable {
 struct GazeCalibration: Codable, Equatable {
     var mapper: GazeMapper
     var screenRect: CGRect
+    /// Median open-eye EAR measured during calibration; seeds the blink
+    /// detector's baseline. Optional so pre-existing saves still decode.
+    var openEAR: Double? = nil
 
     static func load() -> GazeCalibration? {
         guard let data = UserDefaults.standard.data(forKey: PrefKey.gazeCalibrationData)

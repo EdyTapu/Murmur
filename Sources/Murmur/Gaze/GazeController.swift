@@ -210,9 +210,11 @@ final class GazeController: ObservableObject {
         guard state == .starting else { return }
         readyTimeoutTask?.cancel()
         readyTimeoutTask = nil
-        if calibration != nil {
+        if let calibration {
             state = .tracking
-            blink = BlinkDetector(minHold: Prefs.gazeBlinkHold, maxHold: 1.2)
+            blink = BlinkDetector(
+                minHold: Prefs.gazeBlinkHold, maxHold: 1.2,
+                baseline: calibration.openEAR ?? 0.26)
             toast?(true, "Eye control on - blink to click, ⌃⌥E to stop")
         } else {
             beginCalibration()
@@ -223,10 +225,16 @@ final class GazeController: ObservableObject {
 
     private var calibModel: GazeCalibrationModel?
     private var calibWindowController: GazeCalibrationWindowController?
+    /// Completed points' samples (one inner array per captured dot).
     private var calibSamples: [[[Double]]] = []
+    /// Rolling clean samples for the current dot; a blink freezes the ones
+    /// from just before the eyelids moved.
+    private var calibBuffer: [(time: TimeInterval, features: [Double])] = []
+    private var calibBlink = BlinkDetector()
+    private var calibEARs: [Double] = []
     private var calibScreenCG: CGRect = .zero
     private var settleUntil: TimeInterval = 0
-    private var pointStartedAt: TimeInterval = 0
+    private var lastCleanSampleAt: TimeInterval = 0
     private let samplesPerPoint = 12
 
     private func beginCalibration() {
@@ -234,14 +242,18 @@ final class GazeController: ObservableObject {
         closeCalibrationUI()
         state = .calibrating
         calibScreenCG = Self.cgRect(of: screen)
-        calibSamples = [[]]
+        calibSamples = []
+        calibBuffer = []
+        calibEARs = []
+        // Slightly lenient hold window - calibration is also blink practice.
+        calibBlink = BlinkDetector(minHold: max(0.2, Prefs.gazeBlinkHold * 0.7), maxHold: 1.6)
         let model = GazeCalibrationModel()
         calibModel = model
         let windowController = GazeCalibrationWindowController()
         calibWindowController = windowController
         let now = CACurrentMediaTime()
         settleUntil = now + 1.2
-        pointStartedAt = now
+        lastCleanSampleAt = now
         windowController.show(on: screen, model: model) { [weak self] in
             self?.stopSession(toastMessage: "Calibration cancelled")
         }
@@ -252,37 +264,69 @@ final class GazeController: ObservableObject {
         calibWindowController = nil
         calibModel = nil
         calibSamples = []
+        calibBuffer = []
     }
 
+    /// User-paced: each dot waits for a deliberate blink and captures the
+    /// gaze samples from just before it - nothing advances until the user is
+    /// ready, and every dot doubles as blink-click practice.
     private func handleCalibration(_ sample: GazeSample) {
         guard let model = calibModel else { return }
         model.faceVisible = sample.face
         let now = CACurrentMediaTime()
 
-        // A point that stays starved of clean samples means the tracker
-        // can't see the eyes - bail with a diagnosis instead of hanging.
-        if now - pointStartedAt > 8, (calibSamples.last?.count ?? 0) < 4 {
+        // Nothing clean for a long stretch means the tracker can't see the
+        // eyes at all - bail with a diagnosis instead of hanging forever.
+        if now - lastCleanSampleAt > 20 {
             stopSession()
             toast?(false, "Couldn't track your eyes - improve lighting and retry")
             return
         }
-        guard sample.face, now >= settleUntil else { return }
-        // Blinks corrupt the iris fit; don't let them into the fit set.
-        guard min(sample.earLeft, sample.earRight) > 0.15 else { return }
+        guard sample.face else { return }
 
-        calibSamples[calibSamples.count - 1].append(sample.features)
-        let count = calibSamples[calibSamples.count - 1].count
-        model.progress = Double(count) / Double(samplesPerPoint)
-        guard count >= samplesPerPoint else { return }
+        let closedAt = calibBlink.closedAt
+        let blinked = calibBlink.process(
+            ear: (sample.earLeft + sample.earRight) / 2, at: now)
+        if blinked {
+            captureCalibrationPoint(blinkStart: closedAt ?? now, at: now)
+            return
+        }
+        // Closing/closed eyes corrupt the iris fit; keep them out of the buffer.
+        if calibBlink.isClosed { return }
+        guard now >= settleUntil,
+            min(sample.earLeft, sample.earRight) > 0.15
+        else { return }
 
+        lastCleanSampleAt = now
+        calibBuffer.append((now, sample.features))
+        if calibBuffer.count > 40 { calibBuffer.removeFirst(calibBuffer.count - 40) }
+        calibEARs.append((sample.earLeft + sample.earRight) / 2)
+        if calibEARs.count > 500 { calibEARs.removeFirst(calibEARs.count - 500) }
+        model.progress = min(Double(calibBuffer.count) / Double(samplesPerPoint), 1)
+        model.awaitingBlink = calibBuffer.count >= samplesPerPoint
+    }
+
+    private func captureCalibrationPoint(blinkStart: TimeInterval, at now: TimeInterval) {
+        guard let model = calibModel else { return }
+        // Only samples from before the eyelids started descending.
+        let usable = calibBuffer.filter { $0.time <= blinkStart - 0.1 }.suffix(samplesPerPoint)
+        guard usable.count >= 6 else { return }  // blinked too early - keep looking
+
+        calibSamples.append(usable.map(\.features))
+        calibBuffer.removeAll()
+        if Prefs.soundFeedback {
+            let sound = NSSound(named: "Tink")
+            sound?.volume = 0.25
+            sound?.play()
+        }
         if calibSamples.count == GazeCalibrationModel.points.count {
             finishCalibration()
         } else {
-            calibSamples.append([])
-            model.pointIndex = calibSamples.count - 1
+            model.pointIndex = calibSamples.count
             model.progress = 0
+            model.awaitingBlink = false
             settleUntil = now + 0.85
-            pointStartedAt = now
+            lastCleanSampleAt = now
         }
     }
 
@@ -295,18 +339,21 @@ final class GazeController: ObservableObject {
                 targets.append(GazeCalibrationModel.points[index])
             }
         }
+        let openEAR = calibEARs.isEmpty ? nil : calibEARs.sorted()[calibEARs.count / 2]
         closeCalibrationUI()
         guard let mapper = GazeMapper.fit(features: features, targets: targets) else {
             stopSession()
             toast?(false, "Calibration failed - please try again")
             return
         }
-        let calibration = GazeCalibration(mapper: mapper, screenRect: calibScreenCG)
+        let calibration = GazeCalibration(
+            mapper: mapper, screenRect: calibScreenCG, openEAR: openEAR)
         calibration.save()
         self.calibration = calibration
         filterX.reset()
         filterY.reset()
-        blink = BlinkDetector(minHold: Prefs.gazeBlinkHold, maxHold: 1.2)
+        blink = BlinkDetector(
+            minHold: Prefs.gazeBlinkHold, maxHold: 1.2, baseline: openEAR ?? 0.26)
         state = .tracking
         toast?(true, "Calibrated - blink to click, ⌃⌥E to stop")
     }

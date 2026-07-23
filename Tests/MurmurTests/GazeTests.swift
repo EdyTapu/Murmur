@@ -109,6 +109,16 @@ import Testing
         #expect(!feed(&d, ear: 0.28, from: 4, to: 4.3))     // reopen, too long
     }
 
+    @Test func seededBaselineDetectsRelativeBlink() {
+        // A person with naturally narrow eyes (open EAR ~0.16): the generic
+        // 0.26 baseline would read them as half-closed, but a seeded
+        // detector clicks on their relative blink.
+        var d = BlinkDetector(minHold: 0.3, maxHold: 1.2, baseline: 0.16)
+        #expect(!feed(&d, ear: 0.16, from: 0, to: 1))
+        #expect(!feed(&d, ear: 0.05, from: 1, to: 1.4))
+        #expect(feed(&d, ear: 0.16, from: 1.4, to: 1.6))
+    }
+
     @Test func reportsClosedStateWhileBlinking() {
         var d = BlinkDetector(minHold: 0.3, maxHold: 1.2)
         _ = feed(&d, ear: 0.28, from: 0, to: 1)

@@ -59,11 +59,19 @@ struct MainWindowView: View {
 struct HomeSection: View {
     @ObservedObject var controller: AppController
     @ObservedObject var history: HistoryStore
+    @ObservedObject var gaze: GazeController
+
+    init(controller: AppController, history: HistoryStore) {
+        self.controller = controller
+        self.history = history
+        self.gaze = controller.gaze
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 statusCard
+                gazeCard
                 statTiles
                 recent
             }
@@ -117,6 +125,36 @@ struct HomeSection: View {
                 controller.toggleHandsFree()
             }
             .disabled(!controller.isReady && !isRecording)
+        }
+        .padding(16)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    // MARK: Eye control
+
+    private var gazeCard: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "eye")
+                .font(.title2)
+                .foregroundStyle(gaze.state == .off ? Color.secondary : Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(gaze.statusText)
+                    .font(.headline)
+                Text(gaze.isInstalled
+                    ? "Look to move the cursor, blink to click · ⌃⌥E toggles anywhere."
+                    : "One-time setup needed - see Settings → Eye.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(gaze.state == .off ? "Start" : "Stop") {
+                gaze.toggle()
+            }
+            .disabled(!gaze.isInstalled)
+            Button("Recalibrate") {
+                gaze.recalibrate()
+            }
+            .disabled(!gaze.isInstalled)
         }
         .padding(16)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))

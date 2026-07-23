@@ -16,6 +16,9 @@ final class GazeCalibrationModel: ObservableObject {
     @Published var pointIndex = 0
     @Published var progress: Double = 0
     @Published var faceVisible = true
+    /// Enough gaze samples buffered - waiting for the user's deliberate
+    /// blink to capture this point.
+    @Published var awaitingBlink = false
 
     var currentPoint: CGPoint { Self.points[min(pointIndex, Self.points.count - 1)] }
 }
@@ -72,15 +75,13 @@ struct GazeCalibrationView: View {
                 Color.black.opacity(0.88)
 
                 VStack(spacing: 8) {
-                    Text("Follow the dot with your eyes")
+                    Text("Look at the dot, then blink to capture it")
                         .font(.title2.weight(.semibold))
                         .foregroundStyle(.white)
-                    Text(model.faceVisible
-                        ? "Keep your head still and comfortable · esc to cancel"
-                        : "Can't see your eyes - check lighting and face the camera")
+                    Text(hint)
                         .font(.callout)
-                        .foregroundStyle(model.faceVisible ? .secondary : Color.orange)
-                    Text("Point \(model.pointIndex + 1) of \(GazeCalibrationModel.points.count)")
+                        .foregroundStyle(hintColor)
+                    Text("Point \(model.pointIndex + 1) of \(GazeCalibrationModel.points.count) · take your time · esc to cancel")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -95,6 +96,22 @@ struct GazeCalibrationView: View {
         }
     }
 
+    private var hint: String {
+        if !model.faceVisible {
+            return "Can't see your eyes - check lighting and face the camera"
+        }
+        if model.awaitingBlink {
+            return "Blink now (hold it a beat) to capture this dot"
+        }
+        return "Keep looking at the dot…"
+    }
+
+    private var hintColor: Color {
+        if !model.faceVisible { return .orange }
+        if model.awaitingBlink { return .green }
+        return .secondary
+    }
+
     private var calibrationDot: some View {
         ZStack {
             Circle()
@@ -102,11 +119,13 @@ struct GazeCalibrationView: View {
                 .frame(width: 44, height: 44)
             Circle()
                 .trim(from: 0, to: model.progress)
-                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 4, lineCap: .round))
+                .stroke(
+                    model.awaitingBlink ? Color.green : Color.accentColor,
+                    style: StrokeStyle(lineWidth: 4, lineCap: .round))
                 .frame(width: 44, height: 44)
                 .rotationEffect(.degrees(-90))
             Circle()
-                .fill(Color.white)
+                .fill(model.awaitingBlink ? Color.green : Color.white)
                 .frame(width: 14, height: 14)
         }
     }
