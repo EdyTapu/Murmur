@@ -13,11 +13,6 @@ struct MurmurApp: App {
             Image(systemName: menuIcon)
         }
 
-        Window("Murmur History", id: "history") {
-            HistoryWindowView(controller: controller)
-        }
-        .defaultSize(width: 620, height: 500)
-
         Settings {
             SettingsView(controller: controller)
         }
@@ -40,25 +35,56 @@ struct MurmurApp: App {
 enum AppShared {
     static let controller = AppController()
     static let onboarding = OnboardingWindowController()
+    static let mainWindow = MainWindowController()
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("Murmur: applicationDidFinishLaunching")
-        Task { @MainActor in
-            let controller = AppShared.controller
-            controller.start()
-            NSLog(
-                "Murmur: started (mic=%d ax=%d)", controller.micGranted ? 1 : 0,
-                controller.axTrusted ? 1 : 0)
-            let needsOnboarding =
-                !UserDefaults.standard.bool(forKey: PrefKey.onboardingDone)
-                || !controller.micGranted || !controller.axTrusted
-            if needsOnboarding {
-                AppShared.onboarding.show(controller: controller)
-                NSLog("Murmur: onboarding window shown")
-            }
+        // Must be read synchronously - the current Apple event is only valid
+        // while it is being handled.
+        let launchedAtLogin = Self.launchedAsLogInItem
+        let controller = AppShared.controller
+        controller.start()
+        NSLog(
+            "Murmur: started (mic=%d ax=%d)", controller.micGranted ? 1 : 0,
+            controller.axTrusted ? 1 : 0)
+        if needsOnboarding {
+            AppShared.onboarding.show(controller: controller)
+            NSLog("Murmur: onboarding window shown")
+        } else if !launchedAtLogin {
+            AppShared.mainWindow.show()
         }
+    }
+
+    /// Double-clicking Murmur.app while it is already running lands here:
+    /// open the dashboard (Wispr-Flow style) instead of doing nothing.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication, hasVisibleWindows flag: Bool
+    ) -> Bool {
+        if needsOnboarding {
+            AppShared.onboarding.show(controller: AppShared.controller)
+        } else {
+            AppShared.mainWindow.show()
+        }
+        return false
+    }
+
+    private var needsOnboarding: Bool {
+        let controller = AppShared.controller
+        return !UserDefaults.standard.bool(forKey: PrefKey.onboardingDone)
+            || !controller.micGranted || !controller.axTrusted
+    }
+
+    /// True when this launch came from a login item, so the dashboard stays
+    /// closed and the app starts as a quiet menu-bar item.
+    private static var launchedAsLogInItem: Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent else { return false }
+        // 'oapp' open-application event carrying propData 'prdt' == 'lgit'.
+        return event.eventID == AEEventID(0x6F61_7070)
+            && event.paramDescriptor(forKeyword: AEKeyword(0x7072_6474))?.enumCodeValue
+                == OSType(0x6C67_6974)
     }
 }
 

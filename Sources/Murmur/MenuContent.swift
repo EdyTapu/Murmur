@@ -2,8 +2,6 @@ import SwiftUI
 
 struct MenuContent: View {
     @ObservedObject var controller: AppController
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Group {
@@ -14,13 +12,14 @@ struct MenuContent: View {
             }
             .disabled(!controller.isReady && !isRecording)
             Divider()
+            Button("Open Murmur") {
+                AppShared.mainWindow.show()
+            }
             Button("History…") {
-                openWindow(id: "history")
-                NSApp.activate(ignoringOtherApps: true)
+                AppShared.mainWindow.show(section: .history)
             }
             Button("Settings…") {
-                openSettings()
-                NSApp.activate(ignoringOtherApps: true)
+                AppShared.mainWindow.show(section: .settings)
             }
             Button("Setup Guide…") {
                 AppShared.onboarding.show(controller: controller)

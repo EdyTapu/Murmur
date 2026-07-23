@@ -220,13 +220,15 @@ final class AppController: ObservableObject {
         }
 
         capturedContext = insertion.captureContext()
-        do {
-            try recorder.startCollecting()
-        } catch {
-            hud.showResult(success: false, message: "Couldn't start the microphone")
-            log.error("startCollecting failed: \(error.localizedDescription, privacy: .public)")
-            return
-        }
+        // The engine restart (if paused) happens off-main inside the recorder;
+        // failure is rare and surfaces here asynchronously.
+        recorder.startCollecting(onEngineFailure: { [weak self] in
+            Task { @MainActor in
+                guard let self, case .recording = self.state else { return }
+                self.cancelRecording()
+                self.hud.showResult(success: false, message: "Couldn't start the microphone")
+            }
+        })
 
         state = .recording(handsFree: handsFree)
         hud.show(.recording(handsFree: handsFree))

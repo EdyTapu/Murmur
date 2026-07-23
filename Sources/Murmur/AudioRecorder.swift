@@ -64,18 +64,31 @@ final class AudioRecorder: @unchecked Sendable {
 
     // MARK: - Recording
 
-    func startCollecting() throws {
+    /// Begin buffering mic audio. Returns immediately: if the engine was
+    /// paused (idle grace period) it is restarted on a background task,
+    /// because `AVAudioEngine.start()` can block for over a second on
+    /// hardware spin-up and a main-thread stall gets the hotkey event tap
+    /// disabled by macOS.
+    func startCollecting(onEngineFailure: @escaping @Sendable () -> Void) {
         prepare()
         idlePauseTask?.cancel()
-        if !engine.isRunning {
-            try engine.start()
-        }
         lock.lock()
         buffers.removeAll()
         peakLevel = 0
         lastVoiceAt = .distantPast
         collecting = true
         lock.unlock()
+
+        guard !engine.isRunning else { return }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            do {
+                try self.engine.start()
+            } catch {
+                self.log.error("Engine start failed: \(error.localizedDescription, privacy: .public)")
+                onEngineFailure()
+            }
+        }
     }
 
     /// Stop collecting and return everything captured as 16 kHz mono Float samples.

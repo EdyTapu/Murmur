@@ -5,6 +5,8 @@ Hold a key, speak, and polished text is inserted wherever your cursor is - all s
 
 Status as of 2026-07-07: **working end-to-end, verified by the user** (fn-hold dictation inserts text into the focused app).
 Build is clean, 16/16 unit tests pass.
+2026-07-12: fixed "holding fn does nothing" - hotkey event tap moved to a dedicated thread with a watchdog, active-tap fallback for the silent Input Monitoring rejection, and the audio engine restart moved off the main thread (details in Architecture + the permissions gotchas).
+2026-07-12: added the Wispr-Flow-style dashboard window (Home stats, History, Scratchpad, Dictionary, Snippets, Settings), screenshot-verified; opening the app now shows it.
 
 ## Run it
 
@@ -15,17 +17,22 @@ zsh app/build.sh release     # just build the .app bundle
 swift test                   # unit tests (rules cleaner, dictionary, history, LLM sanity, categories)
 ```
 
-The app is a menu-bar item (waveform icon, `LSUIElement`, no Dock icon).
+The app is a menu-bar item (waveform icon, `LSUIElement`, no Dock icon while the dashboard is closed).
 Use it: click into any text field, **hold fn** and speak, release to insert.
 **Quick-tap fn** for hands-free (tap again or go silent to stop).
 Say **"scratch that"** to cancel a dictation.
+**Opening the app** (manual launch, or double-clicking Murmur.app while it runs) shows the Wispr-Flow-style dashboard window: Home (stats + recent dictations), History, Scratchpad, Dictionary, Snippets, Settings.
+The Dock icon appears while the dashboard is open and disappears when it closes; login-item launches stay quiet (no window).
 
 ## Architecture
 
 Pipeline: hotkey → record → transcribe → clean → insert → history.
 
 - `AppController` - central coordinator; owns state machine (idle/recording/finishing) and the pipeline.
-- `HotkeyMonitor` - **CGEventTap** (listen-only) on the fn / right-⌘ / right-⌥ key. NSEvent global monitors do NOT receive fn; the event tap is required. Retries tap creation every 3s until Accessibility is granted.
+- `HotkeyMonitor` - **CGEventTap** on the fn / right-⌘ / right-⌥ key, on a **dedicated thread** (never the main run loop).
+  NSEvent global monitors do NOT receive fn; the event tap is required.
+  macOS disables a tap whose host run loop stalls past ~1s, and main-thread stalls (audio engine spin-up, model warm-up) were killing the tap at exactly the moment the user pressed fn - so the tap lives on its own thread with a 2s watchdog that re-creates a missing tap (Accessibility granted late), re-enables a disabled one, and resyncs `isDown` from real hardware state so a missed release can't eat the next hold.
+  Tap mode: tries listen-only first (needs Input Monitoring), falls back to an **active pass-through tap** which is authorized by Accessibility alone - macOS silently rejects *enabling* a listen-only keyboard tap without Input Monitoring (creation succeeds, `tapIsEnabled` stays false; see the permissions gotcha below).
 - `AudioRecorder` - `AVAudioEngine` input tap, **pre-warmed at launch and kept alive** (defends against the VoiceInk empty-short-utterance race). Emits 16 kHz mono `[Float]` (the Sendable currency the transcriber actor needs). RMS-based voice detection drives hands-free silence auto-stop.
 - `Transcriber` (actor) - wraps FluidAudio `UnifiedAsrManager` (Parakeet Unified 0.6B, int8, ANE). Downloads ~600 MB models on first run to `~/Library/Application Support/FluidAudio/Models`, then warms the ANE graph. ~0.2s to transcribe 10s of audio locally.
 - `RulesCleaner` - deterministic zero-latency pass: filler removal, "scratch that" cancel, trailing "new line"/"new paragraph", whitespace/capitalization repair. Pure functions, unit-tested.
@@ -38,7 +45,13 @@ Pipeline: hotkey → record → transcribe → clean → insert → history.
   3. **AppleScript keystroke** - types directly via System Events.
   Refuses secure input fields (`IsSecureEventInputEnabled`).
 - `HUD` - floating non-activating `NSPanel` pill at the bottom of the screen; live mic-level bars + streaming partial text + result toast.
-- `SettingsView` - General (hotkey, silence, sounds, launch-at-login via `SMAppService`), Cleanup (fillers, AI polish, per-app tones), Dictionary, Snippets.
+- `MainWindowController` + `MainWindowView` - the Wispr-Flow-style dashboard (AppKit-hosted window; menu-bar apps can't reliably open SwiftUI Window scenes from the app delegate).
+  Sidebar: Home (stat tiles + recent dictations + hands-free button), History (search/copy/clear), Scratchpad, Dictionary, Snippets, Settings (General + Cleanup stacked).
+  Owns the Dock-icon dance: `.regular` activation policy while open, back to `.accessory` on close.
+  Shown on manual launch and on reopen (double-click while running); a login-item launch is detected via the `'oapp'`/`'prdt'`=`'lgit'` Apple event and stays windowless.
+  Menu-bar items deep-link into sections via `MainWindowState`.
+- `SettingsView` - the classic tabbed Settings scene (Cmd+,): General (hotkey, silence, sounds, launch-at-login via `SMAppService`), Cleanup (fillers, AI polish, per-app tones), Dictionary, Snippets.
+  The dashboard reuses the same `GeneralSettings`/`CleanupSettings`/`DictionarySettings`/`SnippetSettings` views.
 - `MurmurCLI` (`swift run murmur-cli file.wav`) - headless harness that runs the exact same STT stack; used for latency/pipeline verification without the GUI.
 
 ## Signing & permissions (IMPORTANT)
@@ -57,6 +70,11 @@ Required permissions:
 - **Microphone** - needed to record. Audio never leaves the device.
 
 Gotcha we hit (and the real root cause of "mic never prompts / not in the list"): the missing `audio-input` entitlement above. It was *misdiagnosed* earlier as a Terminal-attribution artifact (launching from a terminal can make macOS credit the terminal's mic grant), but the actual cause was the hardened runtime blocking the mic with no entitlement. With the entitlement present, the prompt fires normally whether launched via `open Murmur.app` or double-click. Onboarding still gates "Done" on Accessibility only (the mic circle is also a manual override), but with the fix the real mic grant now works, so the override should not be needed.
+
+Second gotcha (2026-07-12, the "holding fn does nothing" bug): a **listen-only** keyboard CGEventTap needs **Input Monitoring** (kTCCServiceListenEvent), which Murmur does not have - and macOS rejects it *silently*: `tapCreate` succeeds but `CGEvent.tapEnable` never sticks (`tapIsEnabled` returns false, no error anywhere).
+It appeared to work before only via launch-context permission attribution (inheriting the launching terminal's grants), the same fragile mechanism as the old mic misdiagnosis above.
+Fix shipped: `HotkeyMonitor` verifies `tapIsEnabled` after creation and falls back to an **active pass-through tap**, which is authorized by Accessibility (already required and granted in Murmur's own right).
+Do not "simplify" the tap back to listen-only unless Input Monitoring is added to onboarding.
 
 If a grant ever wedges during development:
 ```
