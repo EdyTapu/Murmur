@@ -101,7 +101,7 @@ struct GazeCalibrationView: View {
             return "Can't see your eyes - check lighting and face the camera"
         }
         if model.awaitingBlink {
-            return "Blink now (hold it a beat) to capture this dot"
+            return "Blink to capture this dot"
         }
         return "Keep looking at the dot…"
     }

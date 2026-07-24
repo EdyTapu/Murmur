@@ -15,7 +15,10 @@ struct OneEuroFilter {
     private var lastDeriv = 0.0
     private var lastTime: TimeInterval?
 
-    init(minCutoff: Double = 0.8, beta: Double = 1.5, dCutoff: Double = 1.0) {
+    /// Defaults tuned for webcam gaze: a low resting cutoff keeps the cursor
+    /// steady while fixating (webcam iris jitter is large), and a modest beta
+    /// still lets deliberate glances across the screen move quickly.
+    init(minCutoff: Double = 0.3, beta: Double = 0.5, dCutoff: Double = 1.0) {
         self.minCutoff = minCutoff
         self.beta = beta
         self.dCutoff = dCutoff

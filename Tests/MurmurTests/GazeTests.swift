@@ -109,6 +109,22 @@ import Testing
         #expect(!feed(&d, ear: 0.28, from: 4, to: 4.3))     // reopen, too long
     }
 
+    /// Tracking sessions run with minHold 0: even a quick ~100ms natural
+    /// blink (or wink, via the min-EAR signal) fires a click on reopen.
+    @Test func zeroMinHoldClicksOnQuickBlink() {
+        var d = BlinkDetector(minHold: 0, maxHold: 2.0)
+        _ = feed(&d, ear: 0.28, from: 0, to: 1)
+        #expect(!feed(&d, ear: 0.05, from: 1, to: 1.1))
+        #expect(feed(&d, ear: 0.28, from: 1.1, to: 1.2))
+    }
+
+    @Test func zeroMinHoldStillIgnoresLongRest() {
+        var d = BlinkDetector(minHold: 0, maxHold: 2.0)
+        _ = feed(&d, ear: 0.28, from: 0, to: 1)
+        #expect(!feed(&d, ear: 0.05, from: 1, to: 4))       // eyes rested shut
+        #expect(!feed(&d, ear: 0.28, from: 4, to: 4.2))     // reopen, no click
+    }
+
     @Test func seededBaselineDetectsRelativeBlink() {
         // A person with naturally narrow eyes (open EAR ~0.16): the generic
         // 0.26 baseline would read them as half-closed, but a seeded

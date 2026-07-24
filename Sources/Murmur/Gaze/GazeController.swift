@@ -7,8 +7,8 @@ import os
 /// Eye control: look where you want the cursor, blink to click.
 ///
 /// Session pipeline: ⌃⌥E → camera frames → gaze_helper.py (MediaPipe) →
-/// feature vector → calibrated ridge map → One Euro smoothing → cursor.
-/// A deliberate blink (held ~0.3s) clicks, snapping to the nearest window
+/// feature vector → calibrated ridge map → median + One Euro smoothing →
+/// cursor. Any blink or wink clicks, snapping to the nearest window
 /// title bar or Dock icon so the ~1-2° webcam gaze error still hits the
 /// app you meant. First session runs a 9-point calibration overlay.
 @MainActor
@@ -32,6 +32,9 @@ final class GazeController: ObservableObject {
     private var calibration = GazeCalibration.load()
     private var filterX = OneEuroFilter()
     private var filterY = OneEuroFilter()
+    /// Last few raw mapped points; a component-wise median kills the
+    /// single-frame landmark spikes that One Euro alone would let through.
+    private var recentRaw: [CGPoint] = []
     private var blink = BlinkDetector()
     /// Recent smoothed cursor positions - a blink click lands where the user
     /// was looking just *before* the eyelids started corrupting the iris fit.
@@ -139,6 +142,7 @@ final class GazeController: ObservableObject {
         helper = nil
         filterX.reset()
         filterY.reset()
+        recentRaw.removeAll()
         trail.removeAll()
         if let toastMessage, !wasOff { toast?(true, toastMessage) }
     }
@@ -212,9 +216,7 @@ final class GazeController: ObservableObject {
         readyTimeoutTask = nil
         if let calibration {
             state = .tracking
-            blink = BlinkDetector(
-                minHold: Prefs.gazeBlinkHold, maxHold: 1.2,
-                baseline: calibration.openEAR ?? 0.26)
+            blink = BlinkDetector(baseline: calibration.openEAR ?? 0.26)
             toast?(true, "Eye control on - blink to click, ⌃⌥E to stop")
         } else {
             beginCalibration()
@@ -245,8 +247,9 @@ final class GazeController: ObservableObject {
         calibSamples = []
         calibBuffer = []
         calibEARs = []
-        // Slightly lenient hold window - calibration is also blink practice.
-        calibBlink = BlinkDetector(minHold: max(0.2, Prefs.gazeBlinkHold * 0.7), maxHold: 1.6)
+        // Sessions click on any blink, but capturing a dot keeps a small
+        // minimum hold so a stray natural blink doesn't grab it early.
+        calibBlink = BlinkDetector(minHold: 0.15, maxHold: 1.6)
         let model = GazeCalibrationModel()
         calibModel = model
         let windowController = GazeCalibrationWindowController()
@@ -286,7 +289,7 @@ final class GazeController: ObservableObject {
 
         let closedAt = calibBlink.closedAt
         let blinked = calibBlink.process(
-            ear: (sample.earLeft + sample.earRight) / 2, at: now)
+            ear: min(sample.earLeft, sample.earRight), at: now)
         if blinked {
             captureCalibrationPoint(blinkStart: closedAt ?? now, at: now)
             return
@@ -300,7 +303,9 @@ final class GazeController: ObservableObject {
         lastCleanSampleAt = now
         calibBuffer.append((now, sample.features))
         if calibBuffer.count > 40 { calibBuffer.removeFirst(calibBuffer.count - 40) }
-        calibEARs.append((sample.earLeft + sample.earRight) / 2)
+        // Track the *narrower* eye - the session blink detector watches
+        // min(earL, earR) so winks count, and the baseline must match.
+        calibEARs.append(min(sample.earLeft, sample.earRight))
         if calibEARs.count > 500 { calibEARs.removeFirst(calibEARs.count - 500) }
         model.progress = min(Double(calibBuffer.count) / Double(samplesPerPoint), 1)
         model.awaitingBlink = calibBuffer.count >= samplesPerPoint
@@ -352,8 +357,8 @@ final class GazeController: ObservableObject {
         self.calibration = calibration
         filterX.reset()
         filterY.reset()
-        blink = BlinkDetector(
-            minHold: Prefs.gazeBlinkHold, maxHold: 1.2, baseline: openEAR ?? 0.26)
+        recentRaw.removeAll()
+        blink = BlinkDetector(baseline: openEAR ?? 0.26)
         state = .tracking
         toast?(true, "Calibrated - blink to click, ⌃⌥E to stop")
     }
@@ -376,9 +381,10 @@ final class GazeController: ObservableObject {
         let now = CACurrentMediaTime()
 
         if Prefs.gazeBlinkClick {
+            // min(earL, earR) so closing either eye - blink or wink - clicks.
             let closedAt = blink.closedAt
             let clicked = blink.process(
-                ear: (sample.earLeft + sample.earRight) / 2, at: now)
+                ear: min(sample.earLeft, sample.earRight), at: now)
             if clicked {
                 performClick(lookedAtBefore: closedAt ?? now)
                 return
@@ -397,9 +403,14 @@ final class GazeController: ObservableObject {
         let raw = CGPoint(
             x: rect.minX + u * rect.width,
             y: rect.minY + v * rect.height)
+        recentRaw.append(raw)
+        if recentRaw.count > 3 { recentRaw.removeFirst(recentRaw.count - 3) }
+        let median = CGPoint(
+            x: Self.median(recentRaw.map(\.x)),
+            y: Self.median(recentRaw.map(\.y)))
         let smoothed = CGPoint(
-            x: filterX.filter(raw.x, at: now),
-            y: filterY.filter(raw.y, at: now))
+            x: filterX.filter(median.x, at: now),
+            y: filterY.filter(median.y, at: now))
         let clamped = CGPoint(
             x: min(max(smoothed.x, rect.minX), rect.maxX - 1),
             y: min(max(smoothed.y, rect.minY), rect.maxY - 1))
@@ -425,6 +436,7 @@ final class GazeController: ObservableObject {
         suppressCursorUntil = now + 0.35
         filterX.reset()
         filterY.reset()
+        recentRaw.removeAll()
 
         postMouse(.mouseMoved, at: target)
         postMouse(.leftMouseDown, at: target)
@@ -521,6 +533,11 @@ final class GazeController: ObservableObject {
             }
         }
         return centers
+    }
+
+    private static func median(_ values: [CGFloat]) -> CGFloat {
+        let sorted = values.sorted()
+        return sorted[sorted.count / 2]
     }
 
     // MARK: - Geometry

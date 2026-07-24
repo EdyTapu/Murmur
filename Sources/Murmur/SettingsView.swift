@@ -134,7 +134,6 @@ struct GazeSettings: View {
     @ObservedObject var controller: AppController
     @ObservedObject var gaze: GazeController
     @AppStorage(PrefKey.gazeBlinkClick) private var blinkClick = true
-    @AppStorage(PrefKey.gazeBlinkHold) private var blinkHold = 0.3
     @AppStorage(PrefKey.gazeSnap) private var snap = true
     @AppStorage(PrefKey.gazeSnapRadius) private var snapRadius = 150.0
 
@@ -150,7 +149,7 @@ struct GazeSettings: View {
                     Text(gaze.statusText)
                         .foregroundStyle(gaze.state == .off ? .secondary : Color.green)
                 }
-                Text("Press ⌃⌥E to start or stop an eye-control session. Look where you want the cursor; a deliberate blink clicks.")
+                Text("Press ⌃⌥E to start or stop an eye-control session. Look where you want the cursor; any blink or wink clicks.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -167,10 +166,7 @@ struct GazeSettings: View {
 
                 Toggle("Blink to click", isOn: $blinkClick)
                 if blinkClick {
-                    Slider(value: $blinkHold, in: 0.2...0.7, step: 0.05) {
-                        Text("Blink hold: \(blinkHold, specifier: "%.2f")s")
-                    }
-                    Text("Hold your eyes closed this long to click; quick natural blinks are ignored.")
+                    Text("Any blink or wink clicks where you were looking just before your eyes closed.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
