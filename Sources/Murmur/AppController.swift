@@ -62,6 +62,7 @@ final class AppController: ObservableObject {
         hotkey.onKeyDown = { [weak self] in self?.hotkeyDown() }
         hotkey.onKeyUp = { [weak self] in self?.hotkeyUp() }
         hotkey.start(choice: Prefs.hotkey)
+        restartToggleHotkey()
 
         gaze.toast = { [weak self] success, message in
             self?.hud.showResult(success: success, message: message)
@@ -86,6 +87,49 @@ final class AppController: ObservableObject {
 
     func restartHotkey() {
         hotkey.start(choice: Prefs.hotkey)
+    }
+
+    // MARK: - Toggle shortcut + mic selection
+
+    private var toggleHotkeyID: UInt32?
+    private var micChangeTask: Task<Void, Never>?
+
+    /// (Re-)register the user-recorded toggle shortcut from Prefs.
+    func restartToggleHotkey() {
+        suspendToggleHotkey()
+        guard let shortcut = Prefs.toggleShortcut else { return }
+        toggleHotkeyID = HotkeyCenter.shared.register(
+            keyCode: UInt32(shortcut.keyCode), carbonModifiers: shortcut.carbonModifiers
+        ) { [weak self] in self?.toggleHandsFree() }
+        if toggleHotkeyID == nil {
+            log.error("Toggle shortcut \(shortcut.display, privacy: .public) could not be registered (taken by another app?)")
+        } else {
+            log.info("Toggle shortcut \(shortcut.display, privacy: .public) registered")
+        }
+    }
+
+    /// Temporarily release the shortcut, e.g. while the recorder field is
+    /// capturing keys (a registered combo never reaches local monitors).
+    func suspendToggleHotkey() {
+        if let id = toggleHotkeyID {
+            HotkeyCenter.shared.unregister(id)
+            toggleHotkeyID = nil
+        }
+    }
+
+    /// Apply a changed mic preference. Waits for any in-flight dictation to
+    /// end rather than yanking the device out from under it.
+    func applyMicSelection() {
+        micChangeTask?.cancel()
+        micChangeTask = Task { [weak self] in
+            while let self, self.state != .idle {
+                try? await Task.sleep(for: .milliseconds(200))
+                if Task.isCancelled { return }
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.recorder.reconfigureInputDevice()
+            await self.recorder.warmUp()
+        }
     }
 
     private func loadModels() async {

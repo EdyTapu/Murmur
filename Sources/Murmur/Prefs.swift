@@ -4,6 +4,8 @@ import SwiftUI
 /// UserDefaults-backed preference keys, shared between views (@AppStorage) and controllers.
 enum PrefKey {
     static let hotkey = "hotkey"
+    static let toggleShortcut = "toggleShortcut"
+    static let micDeviceUID = "micDeviceUID"
     static let fillerRemoval = "fillerRemoval"
     static let aiCleanup = "aiCleanup"
     static let tonePersonal = "tonePersonal"
@@ -90,6 +92,22 @@ struct Prefs {
 
     static var hotkey: HotkeyChoice {
         HotkeyChoice(rawValue: defaults.string(forKey: PrefKey.hotkey) ?? "") ?? .fn
+    }
+    /// Optional user-recorded shortcut that toggles hands-free dictation.
+    static var toggleShortcut: ToggleShortcut? {
+        guard let data = defaults.data(forKey: PrefKey.toggleShortcut) else { return nil }
+        return try? JSONDecoder().decode(ToggleShortcut.self, from: data)
+    }
+    static func setToggleShortcut(_ shortcut: ToggleShortcut?) {
+        if let shortcut, let data = try? JSONEncoder().encode(shortcut) {
+            defaults.set(data, forKey: PrefKey.toggleShortcut)
+        } else {
+            defaults.removeObject(forKey: PrefKey.toggleShortcut)
+        }
+    }
+    /// CoreAudio UID of the preferred input device; empty = system default.
+    static var micDeviceUID: String {
+        defaults.string(forKey: PrefKey.micDeviceUID) ?? ""
     }
     static var fillerRemoval: Bool {
         defaults.object(forKey: PrefKey.fillerRemoval) as? Bool ?? true

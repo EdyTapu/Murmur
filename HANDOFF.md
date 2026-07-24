@@ -36,6 +36,11 @@ Pipeline: hotkey → record → transcribe → clean → insert → history.
   NSEvent global monitors do NOT receive fn; the event tap is required.
   macOS disables a tap whose host run loop stalls past ~1s, and main-thread stalls (audio engine spin-up, model warm-up) were killing the tap at exactly the moment the user pressed fn - so the tap lives on its own thread with a 2s watchdog that re-creates a missing tap (Accessibility granted late), re-enables a disabled one, and resyncs `isDown` from real hardware state so a missed release can't eat the next hold.
   Tap mode: tries listen-only first (needs Input Monitoring), falls back to an **active pass-through tap** which is authorized by Accessibility alone - macOS silently rejects *enabling* a listen-only keyboard tap without Input Monitoring (creation succeeds, `tapIsEnabled` stays false; see the permissions gotcha below).
+- `HotkeyCenter` - single owner of all **Carbon RegisterEventHotKey** registrations (gaze ⌃⌥E + the user-recorded dictation-toggle shortcut), dispatching by hotkey ID.
+  Carbon delivers every hot-key event to every installed handler, so per-feature `InstallEventHandler` calls cross-fire the moment a second hotkey exists - always register through the center.
+  `ToggleShortcut` (same file) is the recorded keybind model: requires ⌘/⌥/⌃ or a function key, persists as JSON, renders "⌃⌥⇧⌘X" via UCKeyTranslate.
+- `AudioDevices` - CoreAudio enumeration of input-capable devices (UID + name; UIDs are the stable identity).
+  The preferred mic (Settings → General) is applied in `AudioRecorder.prepare()` by setting `kAudioOutputUnitProperty_CurrentDevice` on the input node's audio unit; changing it tears down and reinstalls the tap because the input format can change, and waits for any in-flight dictation to finish. A disconnected preferred mic falls back to the system default with a log warning.
 - `AudioRecorder` - `AVAudioEngine` input tap, **pre-warmed at launch and kept alive** (defends against the VoiceInk empty-short-utterance race). Emits 16 kHz mono `[Float]` (the Sendable currency the transcriber actor needs). RMS-based voice detection drives hands-free silence auto-stop.
 - `Transcriber` (actor) - wraps FluidAudio `UnifiedAsrManager` (Parakeet Unified 0.6B, int8, ANE). Downloads ~600 MB models on first run to `~/Library/Application Support/FluidAudio/Models`, then warms the ANE graph. ~0.2s to transcribe 10s of audio locally.
 - `RulesCleaner` - deterministic zero-latency pass: filler removal, "scratch that" cancel, trailing "new line"/"new paragraph", whitespace/capitalization repair. Pure functions, unit-tested.
@@ -53,7 +58,8 @@ Pipeline: hotkey → record → transcribe → clean → insert → history.
   Owns the Dock-icon dance: `.regular` activation policy while open, back to `.accessory` on close.
   Shown on manual launch and on reopen (double-click while running); a login-item launch is detected via the `'oapp'`/`'prdt'`=`'lgit'` Apple event and stays windowless.
   Menu-bar items deep-link into sections via `MainWindowState`.
-- `SettingsView` - the classic tabbed Settings scene (Cmd+,): General (hotkey, silence, sounds, launch-at-login via `SMAppService`), Cleanup (fillers, AI polish, per-app tones), Dictionary, Snippets.
+- `SettingsView` - the classic tabbed Settings scene (Cmd+,): General (hotkey, recordable toggle-dictation shortcut, microphone picker, silence, sounds, launch-at-login via `SMAppService`), Cleanup (fillers, AI polish, per-app tones), Dictionary, Snippets.
+  The shortcut recorder suspends the registered Carbon hotkey while capturing (a registered combo never reaches local NSEvent monitors, so re-recording the same combo would otherwise be impossible).
   The dashboard reuses the same `GeneralSettings`/`CleanupSettings`/`DictionarySettings`/`SnippetSettings` views.
 - `MurmurCLI` (`swift run murmur-cli file.wav`) - headless harness that runs the exact same STT stack; used for latency/pipeline verification without the GUI.
 

@@ -57,12 +57,14 @@ else
 fi
 
 # Verify the bundle really carries the stable signature; catches any path
-# where the binary got swapped in after signing.
+# where the binary got swapped in after signing. (Capture first: piping
+# codesign into `grep -q` dies on SIGPIPE under pipefail.)
 if [[ "${ALLOW_ADHOC:-}" != "1" ]]; then
-    codesign -dvv "$APP" 2>&1 | grep -q "Authority=$SIGN_ID" || {
+    SIG_INFO="$(codesign -dvv "$APP" 2>&1)"
+    if ! grep -q "Authority=$SIGN_ID" <<< "$SIG_INFO"; then
         echo "ERROR: built app is not signed with '$SIGN_ID'" >&2
         exit 1
-    }
+    fi
 fi
 
 echo "Built: $APP"

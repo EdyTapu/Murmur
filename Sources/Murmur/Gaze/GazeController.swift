@@ -56,30 +56,13 @@ final class GazeController: ObservableObject {
 
     // MARK: - Hotkey (⌃⌥E)
 
-    /// Carbon RegisterEventHotKey: system-wide, consumes the keystroke, and
-    /// needs no event tap or extra TCC grant - so it can't interfere with the
-    /// dictation hotkey's CGEventTap.
-    private var hotKeyRef: EventHotKeyRef?
-
+    /// Registered through HotkeyCenter (Carbon): system-wide, consumes the
+    /// keystroke, and needs no event tap or extra TCC grant - so it can't
+    /// interfere with the dictation hotkey's CGEventTap.
     func registerHotkey() {
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(
-            GetEventDispatcherTarget(),
-            { _, _, userData in
-                guard let userData else { return noErr }
-                let controller = Unmanaged<GazeController>.fromOpaque(userData)
-                    .takeUnretainedValue()
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated { controller.toggle() }
-                }
-                return noErr
-            },
-            1, &eventType, Unmanaged.passUnretained(self).toOpaque(), nil)
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4D55_5247), id: 1)  // 'MURG'
-        RegisterEventHotKey(
-            UInt32(kVK_ANSI_E), UInt32(controlKey | optionKey), hotKeyID,
-            GetEventDispatcherTarget(), 0, &hotKeyRef)
+        _ = HotkeyCenter.shared.register(
+            keyCode: UInt32(kVK_ANSI_E), carbonModifiers: UInt32(controlKey | optionKey)
+        ) { [weak self] in self?.toggle() }
     }
 
     // MARK: - Session lifecycle

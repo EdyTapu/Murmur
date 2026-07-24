@@ -1,4 +1,5 @@
 import AVFoundation
+import AudioToolbox
 import Foundation
 import os
 
@@ -34,6 +35,7 @@ final class AudioRecorder: @unchecked Sendable {
     func prepare() {
         guard !tapInstalled else { return }
         let input = engine.inputNode
+        applyPreferredDevice()
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             log.error("Input node has invalid format; is a microphone available?")
@@ -45,6 +47,54 @@ final class AudioRecorder: @unchecked Sendable {
         tapInstalled = true
         engine.prepare()
         log.info("Audio tap installed, format \(format.sampleRate, privacy: .public)Hz x\(format.channelCount, privacy: .public)")
+    }
+
+    /// Tracks whether a non-default device was applied to the audio unit, so
+    /// reverting to "System default" knows it must set the property back.
+    private var appliedPreferredDevice = false
+
+    /// Point the engine's input audio unit at the preferred mic (Prefs) if one
+    /// is chosen and present; otherwise leave (or restore) the system default.
+    private func applyPreferredDevice() {
+        let uid = Prefs.micDeviceUID
+        var target: AudioDeviceID?
+        var isPreferred = false
+        if !uid.isEmpty {
+            if let device = AudioDevices.deviceID(forUID: uid) {
+                target = device
+                isPreferred = true
+            } else {
+                log.warning("Preferred mic \(uid, privacy: .public) not connected; using system default")
+            }
+        }
+        if target == nil, appliedPreferredDevice {
+            target = AudioDevices.defaultInputDeviceID()
+        }
+        guard var device = target else { return }
+        guard let unit = engine.inputNode.audioUnit else {
+            log.error("Input node has no audio unit; cannot select mic")
+            return
+        }
+        let status = AudioUnitSetProperty(
+            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+            &device, UInt32(MemoryLayout<AudioDeviceID>.size))
+        if status == noErr {
+            appliedPreferredDevice = isPreferred
+            log.info("Mic set to \(isPreferred ? uid : "system default", privacy: .public)")
+        } else {
+            log.error("Setting mic device failed (status=\(status, privacy: .public))")
+        }
+    }
+
+    /// Re-apply the preferred mic after the user changes it in Settings.
+    /// The tap must be reinstalled because the input format can change.
+    func reconfigureInputDevice() {
+        engine.stop()
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        prepare()
     }
 
     /// Spin the engine briefly so the audio unit is fully initialized, then pause.

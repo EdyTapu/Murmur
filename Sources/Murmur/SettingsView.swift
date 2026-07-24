@@ -17,7 +17,7 @@ struct SettingsView: View {
             SnippetSettings(store: controller.dictionary)
                 .tabItem { Label("Snippets", systemImage: "text.badge.plus") }
         }
-        .frame(width: 520, height: 420)
+        .frame(width: 520, height: 480)
     }
 }
 
@@ -26,9 +26,11 @@ struct SettingsView: View {
 struct GeneralSettings: View {
     @ObservedObject var controller: AppController
     @AppStorage(PrefKey.hotkey) private var hotkey = HotkeyChoice.fn.rawValue
+    @AppStorage(PrefKey.micDeviceUID) private var micDeviceUID = ""
     @AppStorage(PrefKey.silenceAutoStop) private var silenceAutoStop = true
     @AppStorage(PrefKey.silenceSeconds) private var silenceSeconds = 2.5
     @AppStorage(PrefKey.soundFeedback) private var soundFeedback = true
+    @State private var inputDevices: [AudioInputDevice] = []
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
 
@@ -43,6 +45,29 @@ struct GeneralSettings: View {
                 controller.restartHotkey()
             }
             Text("Hold to talk; quick-tap for hands-free.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ToggleShortcutRecorder(controller: controller)
+
+            Divider()
+
+            Picker("Microphone:", selection: $micDeviceUID) {
+                Text("System default").tag("")
+                ForEach(inputDevices) { device in
+                    Text(device.name).tag(device.uid)
+                }
+                if !micDeviceUID.isEmpty, !inputDevices.contains(where: { $0.uid == micDeviceUID }) {
+                    Text("Saved mic (disconnected)").tag(micDeviceUID)
+                }
+            }
+            .onChange(of: micDeviceUID) {
+                controller.applyMicSelection()
+            }
+            .onAppear {
+                inputDevices = AudioDevices.inputDevices()
+            }
+            Text("A disconnected mic falls back to the system default until it returns.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -78,6 +103,77 @@ struct GeneralSettings: View {
             }
         }
         .padding(20)
+    }
+}
+
+/// "Record Shortcut" field for the hands-free toggle keybind. While recording,
+/// a local key monitor captures the next combo; the registered Carbon hotkey
+/// is suspended so re-recording the current combo works (a registered hotkey
+/// never reaches local monitors). Esc cancels, ⌘/⌥/⌃ or an F-key is required.
+struct ToggleShortcutRecorder: View {
+    @ObservedObject var controller: AppController
+    @State private var shortcut = Prefs.toggleShortcut
+    @State private var recording = false
+    @State private var monitor: Any?
+
+    var body: some View {
+        LabeledContent("Toggle dictation:") {
+            HStack(spacing: 6) {
+                Button {
+                    recording ? stopRecording() : startRecording()
+                } label: {
+                    Text(recording ? "Press keys… (esc cancels)" : (shortcut?.display ?? "Record Shortcut"))
+                        .frame(minWidth: 130)
+                }
+                if shortcut != nil, !recording {
+                    Button {
+                        shortcut = nil
+                        Prefs.setToggleShortcut(nil)
+                        controller.restartToggleHotkey()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove shortcut")
+                }
+            }
+        }
+        Text("Press once to start hands-free dictation, again to stop. Combine ⌘, ⌥ or ⌃ with a key, or use a function key.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    private func startRecording() {
+        recording = true
+        controller.suspendToggleHotkey()
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let plainEscape =
+                event.keyCode == 53
+                && event.modifierFlags
+                    .intersection([.command, .option, .control, .shift]).isEmpty
+            if plainEscape {
+                stopRecording()
+                return nil
+            }
+            guard
+                let captured = ToggleShortcut(
+                    keyCode: event.keyCode, modifierFlags: event.modifierFlags)
+            else {
+                NSSound.beep()
+                return nil
+            }
+            shortcut = captured
+            Prefs.setToggleShortcut(captured)
+            stopRecording()
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        recording = false
+        controller.restartToggleHotkey()
     }
 }
 
