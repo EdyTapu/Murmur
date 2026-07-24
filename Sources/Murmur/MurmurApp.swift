@@ -51,8 +51,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "Murmur: started (mic=%d ax=%d)", controller.micGranted ? 1 : 0,
             controller.axTrusted ? 1 : 0)
         if needsOnboarding {
-            AppShared.onboarding.show(controller: controller)
-            NSLog("Murmur: onboarding window shown")
+            if UserDefaults.standard.bool(forKey: PrefKey.onboardingDone) {
+                // Onboarding was completed before, so a missing permission here
+                // is usually a transient early-login TCC misread. The 2s
+                // permission poll in AppController corrects it; only nag if
+                // the permission is still missing after a grace period.
+                NSLog("Murmur: permissions read missing at launch; deferring onboarding")
+                Task { @MainActor in
+                    for _ in 0..<15 {
+                        try? await Task.sleep(for: .seconds(2))
+                        if !self.needsOnboarding {
+                            NSLog("Murmur: permissions recovered; onboarding skipped")
+                            return
+                        }
+                    }
+                    AppShared.onboarding.show(controller: AppShared.controller)
+                    NSLog("Murmur: onboarding window shown after grace period")
+                }
+            } else {
+                AppShared.onboarding.show(controller: controller)
+                NSLog("Murmur: onboarding window shown")
+            }
         } else if !launchedAtLogin {
             AppShared.mainWindow.show()
         }

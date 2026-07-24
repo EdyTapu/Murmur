@@ -7,8 +7,9 @@ Status as of 2026-07-07: **working end-to-end, verified by the user** (fn-hold d
 Build is clean, 16/16 unit tests pass.
 2026-07-12: fixed "holding fn does nothing" - hotkey event tap moved to a dedicated thread with a watchdog, active-tap fallback for the silent Input Monitoring rejection, and the audio engine restart moved off the main thread (details in Architecture + the permissions gotchas).
 2026-07-12: added the Wispr-Flow-style dashboard window (Home stats, History, Scratchpad, Dictionary, Snippets, Settings), screenshot-verified; opening the app now shows it.
-2026-07-23: added **eye control v1** (⌃⌥E): look where you want the cursor, deliberate blink to click, 9-point calibration overlay, snap-to-window/Dock targets.
-Built + 27/27 tests green; the live camera loop still needs its first user-granted Camera permission run (see Eye control section).
+2026-07-23: added **eye control v1** (⌃⌥E): look where you want the cursor, blink to click, 9-point calibration overlay, snap-to-window/Dock targets.
+2026-07-23 v1.2 (after live user feedback): any blink or wink clicks instantly (no hold requirement), and cursor jitter cut with a median prefilter + steadier One Euro tuning.
+Built + 29/29 tests green.
 
 ## Run it
 
@@ -58,10 +59,10 @@ Pipeline: hotkey → record → transcribe → clean → insert → history.
 
 ## Eye control (v1, 2026-07-23)
 
-Press **⌃⌥E** to toggle an eye-control session: the cursor follows your gaze, a deliberate blink (~0.3s hold, natural blinks ignored) clicks.
+Press **⌃⌥E** to toggle an eye-control session: the cursor follows your gaze, and **any blink or wink clicks** (v1.2, 2026-07-23: the session detector runs minHold 0 on `min(earL, earR)`, so a quick natural blink or a one-eyed wink fires on reopen; only closures past 2s are ignored as resting).
 First session shows a fullscreen 9-point calibration overlay (esc cancels); the calibration persists in UserDefaults.
-Calibration is **user-paced and blink-confirmed** (2026-07-23 v1.1): each dot buffers gaze samples, then waits for a deliberate blink and captures the samples from just before the eyelids moved - nothing advances until the user blinks, and the flow doubles as blink-click practice.
-The median open-eye EAR measured during calibration is stored (`GazeCalibration.openEAR`) and seeds the session `BlinkDetector`, so blink-to-click works from the first blink even for narrow or wide eye shapes.
+Calibration is **user-paced and blink-confirmed** (2026-07-23 v1.1): each dot buffers gaze samples, then waits for a blink and captures the samples from just before the eyelids moved - nothing advances until the user blinks, and the flow doubles as blink-click practice. Dot capture keeps a small 0.15s minimum hold so a stray natural blink doesn't grab a dot early.
+The median open-eye EAR (of the narrower eye, matching the session's min-EAR signal) measured during calibration is stored (`GazeCalibration.openEAR`) and seeds the session `BlinkDetector`, so blink-to-click works from the first blink even for narrow or wide eye shapes.
 Recalibrate from the dashboard **Home page card** (Start/Stop + Recalibrate buttons), the menu-bar "Recalibrate Eye Control…", or Settings → Eye.
 Clicks snap to the nearest window title bar or Dock icon within a configurable radius (Settings → Eye), which is what makes coarse webcam gaze reliable for app switching.
 
@@ -74,7 +75,7 @@ Architecture (all new code in `Sources/Murmur/Gaze/`):
 - `app/gaze_helper.py` (bundled into Resources) is a **pure stdin→stdout child**: raw BGRA frames in, one JSON line of features out (iris-in-eye-box offsets, head pose matrix angles + translation, eye aspect ratios). No camera, no network, no TCC of its own. MediaPipe's legacy `solutions` API is GONE in 0.10.35 - it uses the Tasks `FaceLandmarker` (VIDEO mode, needs the `.task` model path as argv).
 - `GazeHelperProcess` spawns the venv python, drops frames when >2 are in flight (backpressure), drains stderr (glog chatter would otherwise fill the pipe and hang the child).
 - `GazeMapper` - ridge regression from the 10-dim features (+ quadratic iris terms) to normalized screen coords; features are standardized per-column first (iris ~0.1 vs head translation ~tens of cm). Fitted from the 9-point calibration, persisted via `GazeCalibration` (mapper + target screen rect in CG coords).
-- `OneEuroFilter` smooths the cursor; `BlinkDetector` turns EAR into deliberate-blink events with an adaptive open-eye baseline + hysteresis; clicks land where the user looked ~120ms *before* the eyelids started moving (positions ring buffer).
+- Cursor smoothing is a **median-of-3 prefilter** (kills single-frame landmark spikes) into `OneEuroFilter` (v1.2 tuning: minCutoff 0.3, beta 0.5 - much steadier at fixation than the original 0.8/1.5); `BlinkDetector` turns EAR into click events with an adaptive open-eye baseline + hysteresis; clicks land where the user looked ~120ms *before* the eyelids started moving (positions ring buffer).
 - `GazeController` - session state machine, Carbon `RegisterEventHotKey` for ⌃⌥E (system-wide, consumes the key, no event tap → can't interfere with the dictation tap), calibration driving, cursor posting via CGEvents, snap-target discovery (CGWindowList title bars + Dock icons via AX).
 
 Known v1 limits: single screen (the one calibrated on); recalibrate if you move your laptop or slouch differently; Continuity Camera iPhones may be picked over the built-in camera if active; physical mouse use during a session fights the gaze cursor (stop the session to mouse normally).
@@ -83,7 +84,14 @@ Known v1 limits: single screen (the one calibrated on); recalibrate if you move 
 
 The app is signed with a **stable self-signed identity "Murmur Dev Signing"** (in the login keychain).
 This is what makes TCC permission grants (Accessibility, Microphone) **survive rebuilds** - ad-hoc signing (`-`) changes the identity every build and silently invalidates grants.
-`app/build.sh` auto-detects the identity and uses it; falls back to ad-hoc if missing.
+`app/build.sh` requires the identity and **fails hard if it is missing** (`ALLOW_ADHOC=1` to override for a throwaway build); it also verifies the final bundle carries the identity.
+It used to silently fall back to ad-hoc, which caused the 2026-07-23 "asks for Accessibility on every restart" bug: a build shipped with only the linker's ad-hoc signature, so the TCC Accessibility grant (pinned to the cert leaf) stopped matching, `AXIsProcessTrusted()` read false at every launch, and the hotkey tap ran degraded on the 2s watchdog.
+
+Third gotcha (2026-07-23, `codesign` fails with `errSecInternalComponent`): the signing key's keychain **partition list** only contained `apple-tool:` (the `security` CLI), so `codesign` (partition `apple:`) was blocked instantly - this is what silently broke the signing step and produced the ad-hoc build above.
+`security set-key-partition-list` could not fix it: the key's label contained a trailing NUL (unmatchable from the CLI, later relabeled to "Murmur Dev Signing Key" via `SecItemUpdate`) and `SecKeychainItemSetAccessWithPassword` rejected the correct login password.
+Fix that worked: replace the key's access object via `SecAccessCreate` + `SecKeychainItemSetAccess` from a small Swift script, trusting `/usr/bin/codesign` and `/usr/bin/security`; the new access carries no `partition_id` ACL entry, so the partition check no longer applies.
+If signing ever breaks again with `errSecInternalComponent`, re-run that approach (scratch script pattern: query key by `kSecAttrApplicationLabel` = public-key hash `21CA411F...`).
+Also: launch-time permission misreads no longer nag - `MurmurApp` defers onboarding ~30s at login when onboarding was already completed, and skips it if the permission poll recovers.
 
 It is signed with the **hardened runtime** (`--options runtime`) plus `app/Murmur.entitlements`.
 The entitlements are **mandatory, not optional**: under the hardened runtime, microphone access requires `com.apple.security.device.audio-input`. Without it macOS denies the mic *at the runtime layer* and **never shows the permission prompt at all** - `requestAccess` returns immediately, recording captures pure silence, and the app never appears in System Settings → Privacy → Microphone. (We also grant `com.apple.security.automation.apple-events` for the AppleScript-keystroke insertion fallback.) Verified via `tccd` logs: with the entitlement, `tccd` reaches `AUTHREQ_PROMPTING` for `kTCCServiceMicrophone`; without it, it never does.

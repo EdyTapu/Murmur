@@ -30,9 +30,12 @@ cp "$ROOT/app/gaze_helper.py" "$APP/Contents/Resources/gaze_helper.py"
 # Strip any inherited extended attributes so the signature verifies strictly.
 xattr -cr "$APP" 2>/dev/null || true
 
-# Sign with the stable self-signed "Murmur Dev Signing" identity if present, so
-# macOS treats every rebuild as the same app and TCC permission grants survive.
-# Falls back to ad-hoc signing when the identity is missing.
+# Sign with the stable self-signed "Murmur Dev Signing" identity, so macOS
+# treats every rebuild as the same app and TCC permission grants survive.
+# An ad-hoc-signed build silently breaks the Accessibility grant (the TCC
+# entry pins the cert leaf), so a missing identity is a hard error - it
+# usually means this ran in a sandboxed shell that cannot see the keychain.
+# Set ALLOW_ADHOC=1 only if you knowingly want a throwaway build.
 ENTITLEMENTS="$ROOT/app/Murmur.entitlements"
 SIGN_ID="Murmur Dev Signing"
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
@@ -42,10 +45,24 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; th
     codesign --force --sign "$SIGN_ID" --identifier com.alessio.murmur \
         --options runtime --entitlements "$ENTITLEMENTS" "$APP"
     echo "Signed with '$SIGN_ID' + entitlements"
-else
+elif [[ "${ALLOW_ADHOC:-}" == "1" ]]; then
     codesign --force --sign - --identifier com.alessio.murmur \
         --entitlements "$ENTITLEMENTS" "$APP"
-    echo "Ad-hoc signed with entitlements (stable identity not found)"
+    echo "WARNING: ad-hoc signed - TCC grants will NOT match this build"
+else
+    echo "ERROR: signing identity '$SIGN_ID' not found in the keychain." >&2
+    echo "If running from an agent sandbox, re-run with sandbox disabled." >&2
+    echo "To force a throwaway ad-hoc build: ALLOW_ADHOC=1 zsh app/build.sh" >&2
+    exit 1
+fi
+
+# Verify the bundle really carries the stable signature; catches any path
+# where the binary got swapped in after signing.
+if [[ "${ALLOW_ADHOC:-}" != "1" ]]; then
+    codesign -dvv "$APP" 2>&1 | grep -q "Authority=$SIGN_ID" || {
+        echo "ERROR: built app is not signed with '$SIGN_ID'" >&2
+        exit 1
+    }
 fi
 
 echo "Built: $APP"
