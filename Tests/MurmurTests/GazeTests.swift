@@ -162,6 +162,59 @@ import Testing
     }
 }
 
+@Suite struct PuckerDetectorTests {
+    private func feed(
+        _ detector: inout PuckerDetector, ratio: Double, from: Double, to: Double
+    ) -> Bool {
+        var clicked = false
+        var t = from
+        while t < to {
+            if detector.process(widthRatio: ratio, at: t) { clicked = true }
+            t += 0.033
+        }
+        return clicked
+    }
+
+    @Test func deliberatePuckerClicksOnRelease() {
+        var d = PuckerDetector()
+        #expect(!feed(&d, ratio: 0.42, from: 0, to: 1))      // relaxed mouth
+        #expect(!feed(&d, ratio: 0.30, from: 1, to: 1.4))    // held pucker
+        #expect(feed(&d, ratio: 0.42, from: 1.4, to: 1.6))   // release → click
+    }
+
+    @Test func transientSpeechNarrowingIgnored() {
+        // An "oo" phoneme narrows the lips for ~100ms - under minHold.
+        var d = PuckerDetector()
+        _ = feed(&d, ratio: 0.42, from: 0, to: 1)
+        #expect(!feed(&d, ratio: 0.30, from: 1, to: 1.1))
+        #expect(!feed(&d, ratio: 0.42, from: 1.1, to: 1.4))
+    }
+
+    @Test func longNarrowingIgnored() {
+        // Resting with pursed lips shouldn't click on eventual release.
+        var d = PuckerDetector()
+        _ = feed(&d, ratio: 0.42, from: 0, to: 1)
+        #expect(!feed(&d, ratio: 0.30, from: 1, to: 4))
+        #expect(!feed(&d, ratio: 0.42, from: 4, to: 4.3))
+    }
+
+    @Test func baselineAdaptsToNarrowMouths() {
+        // A person whose relaxed ratio is 0.30: after settling, their
+        // relative pucker to 0.22 must still click.
+        var d = PuckerDetector(baseline: 0.30)
+        #expect(!feed(&d, ratio: 0.30, from: 0, to: 2))
+        #expect(!feed(&d, ratio: 0.22, from: 2, to: 2.4))
+        #expect(feed(&d, ratio: 0.30, from: 2.4, to: 2.6))
+    }
+
+    @Test func zeroRatioIsIgnored() {
+        var d = PuckerDetector()
+        _ = feed(&d, ratio: 0.42, from: 0, to: 1)
+        #expect(!feed(&d, ratio: 0, from: 1, to: 2))
+        #expect(!d.isNarrow)
+    }
+}
+
 @Suite struct RobustSpreadTests {
     @Test func ignoresOutlierFrames() {
         // 18 samples of a steady pose + 2 landmark spikes: raw max-min would

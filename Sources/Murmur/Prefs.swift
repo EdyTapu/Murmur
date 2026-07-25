@@ -19,6 +19,7 @@ enum PrefKey {
     static let soundFeedback = "soundFeedback"
     static let onboardingDone = "onboardingDone"
     static let gazeBlinkClick = "gazeBlinkClick"
+    static let gazePuckerClick = "gazePuckerClick"
     static let gazeSnap = "gazeSnap"
     static let gazeSnapRadius = "gazeSnapRadius"
     static let headSensitivity = "headSensitivity"
@@ -135,6 +136,9 @@ struct Prefs {
     }
     static var gazeBlinkClick: Bool {
         defaults.object(forKey: PrefKey.gazeBlinkClick) as? Bool ?? true
+    }
+    static var gazePuckerClick: Bool {
+        defaults.object(forKey: PrefKey.gazePuckerClick) as? Bool ?? true
     }
     static var gazeSnap: Bool {
         defaults.object(forKey: PrefKey.gazeSnap) as? Bool ?? true

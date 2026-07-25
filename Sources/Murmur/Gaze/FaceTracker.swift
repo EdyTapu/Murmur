@@ -13,8 +13,11 @@ struct HeadSample: Sendable {
     let measure: CGPoint
     let earLeft: Double
     let earRight: Double
+    /// Outer-lip width over face-box width; drops ~20-35% on a lip pucker.
+    let mouthWidthRatio: Double
 
-    static let noFace = HeadSample(face: false, measure: .zero, earLeft: 0, earRight: 0)
+    static let noFace = HeadSample(
+        face: false, measure: .zero, earLeft: 0, earRight: 0, mouthWidthRatio: 0)
 }
 
 /// On-device face landmark tracking via Apple Vision - replaces the old
@@ -30,6 +33,12 @@ final class FaceTracker: @unchecked Sendable {
     /// Sequence handler: lets Vision reuse tracking state across video frames.
     private let sequence = VNSequenceRequestHandler()
 
+    /// EMA-smoothed face-box size (camera-queue only). The box size divides
+    /// every measure, so frame-to-frame box wobble multiplies straight into
+    /// cursor jitter - but real size changes (leaning in/out) are slow, so a
+    /// heavy EMA is safe. Reset when the face is lost.
+    private var smoothedBoxSize: CGSize?
+
     func process(_ pixelBuffer: CVPixelBuffer) {
         let request = VNDetectFaceLandmarksRequest()
         do {
@@ -43,22 +52,34 @@ final class FaceTracker: @unchecked Sendable {
             width: CVPixelBufferGetWidth(pixelBuffer),
             height: CVPixelBufferGetHeight(pixelBuffer))
         guard let observation = request.results?.first,
-            let sample = Self.sample(from: observation, imageSize: size)
+            let sample = sample(from: observation, imageSize: size)
         else {
+            smoothedBoxSize = nil
             onSample?(.noFace)
             return
         }
         onSample?(sample)
     }
 
-    /// Pure conversion from a Vision face observation, in image pixel space
+    /// Conversion from a Vision face observation, in image pixel space
     /// (landmark regions are box-normalized; the box aspect changes with pose,
     /// so EAR and the nose measure are computed in pixels).
-    static func sample(from observation: VNFaceObservation, imageSize: CGSize) -> HeadSample? {
+    private func sample(from observation: VNFaceObservation, imageSize: CGSize) -> HeadSample? {
         guard let landmarks = observation.landmarks else { return nil }
         let box = VNImageRectForNormalizedRect(
             observation.boundingBox, Int(imageSize.width), Int(imageSize.height))
         guard box.width > 1, box.height > 1 else { return nil }
+
+        // Divide by the EMA-smoothed box size, not the instantaneous one.
+        let boxSize: CGSize
+        if let prev = smoothedBoxSize {
+            boxSize = CGSize(
+                width: prev.width * 0.9 + box.width * 0.1,
+                height: prev.height * 0.9 + box.height * 0.1)
+        } else {
+            boxSize = box.size
+        }
+        smoothedBoxSize = boxSize
 
         // Average ALL noseCrest points (bridge to tip), not just the tip:
         // the whole crest moves together with head rotation, and the mean of
@@ -72,8 +93,8 @@ final class FaceTracker: @unchecked Sendable {
             y: points.map(\.y).reduce(0, +) / CGFloat(points.count))
 
         let measure = CGPoint(
-            x: (nosePoint.x - box.midX) / box.width,
-            y: (nosePoint.y - box.midY) / box.height)
+            x: (nosePoint.x - box.midX) / boxSize.width,
+            y: (nosePoint.y - box.midY) / boxSize.height)
 
         let earLeft = landmarks.leftEye.map {
             Self.aspectRatio(of: $0.pointsInImage(imageSize: imageSize))
@@ -81,11 +102,21 @@ final class FaceTracker: @unchecked Sendable {
         let earRight = landmarks.rightEye.map {
             Self.aspectRatio(of: $0.pointsInImage(imageSize: imageSize))
         }
+        // Outer-lip width, face-box-relative: the pucker-to-click signal.
+        var mouthWidthRatio = 0.42
+        if let lips = landmarks.outerLips {
+            let lipPoints = lips.pointsInImage(imageSize: imageSize)
+            if let minX = lipPoints.map(\.x).min(), let maxX = lipPoints.map(\.x).max(),
+                boxSize.width > 0 {
+                mouthWidthRatio = Double((maxX - minX) / boxSize.width)
+            }
+        }
         return HeadSample(
             face: true,
             measure: measure,
             earLeft: earLeft ?? 0.3,
-            earRight: earRight ?? 0.3)
+            earRight: earRight ?? 0.3,
+            mouthWidthRatio: mouthWidthRatio)
     }
 
     /// Eye Aspect Ratio from an eye contour: bounding height over width.

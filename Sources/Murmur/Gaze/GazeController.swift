@@ -33,23 +33,26 @@ final class GazeController: ObservableObject {
     private var tracker: FaceTracker?
     private var camera: GazeCamera?
     private var pointer = HeadPointer(gain: Prefs.headSensitivity)
-    /// Head tuning, round 3: 1.5/3.0 fixed the lag but let raw landmark
-    /// noise shake the cursor across the screen ("very buggy and jitters").
-    /// 1.0/1.5 is the middle ground now that FaceTracker averages the whole
-    /// nose crest and a deadband eats the residual shimmer.
-    private var filterX = OneEuroFilter(minCutoff: 1.0, beta: 1.5)
-    private var filterY = OneEuroFilter(minCutoff: 1.0, beta: 1.5)
+    /// Head tuning, round 4: minCutoff down for a calmer resting cursor
+    /// ("still jitters a bit"), beta up so deliberate motion stays snappy -
+    /// that split is exactly what One Euro's two knobs are for. Source-level
+    /// noise also dropped (FaceTracker EMAs the face-box divisor).
+    private var filterX = OneEuroFilter(minCutoff: 0.6, beta: 2.0)
+    private var filterY = OneEuroFilter(minCutoff: 0.6, beta: 2.0)
     /// Last cursor position actually posted; movements under the deadband
     /// are dropped so the cursor holds perfectly still at rest.
     private var lastPosted: CGPoint?
-    private let deadbandPx: CGFloat = 3
+    private let deadbandPx: CGFloat = 4
     /// Last few raw mapped points; a component-wise median kills the
     /// single-frame landmark spikes that One Euro alone would let through.
     private var recentRaw: [CGPoint] = []
     private var blink = BlinkDetector(minHold: 0.1)
+    private var pucker = PuckerDetector()
     /// Median-of-3 EAR window: Vision eye contours spike on single frames,
     /// and a raw spike below the closed threshold reads as a blink.
     private var recentEARs: [Double] = []
+    /// Same median-of-3 treatment for the mouth-width pucker signal.
+    private var recentWidths: [Double] = []
     /// Refractory period after a click so a flappy EAR can't click-storm.
     private var clickCooldownUntil: TimeInterval = 0
     /// Recent smoothed cursor positions - a blink click lands where the user
@@ -189,6 +192,7 @@ final class GazeController: ObservableObject {
         filterY.reset()
         recentRaw.removeAll()
         recentEARs.removeAll()
+        recentWidths.removeAll()
         trail.removeAll()
         lastPosted = nil
         if let toastMessage, !wasOff { toast?(true, toastMessage) }
@@ -210,7 +214,9 @@ final class GazeController: ObservableObject {
         boundsCalibrated = pointer.bounds != nil
         neutralSamples = []
         blink = BlinkDetector(minHold: 0.1)
+        pucker = PuckerDetector()
         recentEARs = []
+        recentWidths = []
         toast?(true, "Starting head control - face the screen…")
 
         let tracker = FaceTracker()
@@ -285,6 +291,16 @@ final class GazeController: ObservableObject {
         }
         guard state == .tracking else { return }
 
+        if Prefs.gazePuckerClick, sample.face {
+            recentWidths.append(sample.mouthWidthRatio)
+            if recentWidths.count > 3 { recentWidths.removeFirst(recentWidths.count - 3) }
+            let narrowedAt = pucker.narrowedAt
+            let clicked = pucker.process(widthRatio: Self.median(recentWidths), at: now)
+            if clicked, now >= clickCooldownUntil {
+                performClick(pointedAtBefore: narrowedAt ?? now)
+                return
+            }
+        }
         if Prefs.gazeBlinkClick, sample.face {
             // min(earL, earR) so closing either eye - blink or wink - clicks.
             recentEARs.append(min(sample.earLeft, sample.earRight))

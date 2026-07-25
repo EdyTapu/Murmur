@@ -231,6 +231,7 @@ struct GazeSettings: View {
     @ObservedObject var gaze: GazeController
     @AppStorage(PrefKey.headSensitivity) private var sensitivity = 3.5
     @AppStorage(PrefKey.gazeBlinkClick) private var blinkClick = true
+    @AppStorage(PrefKey.gazePuckerClick) private var puckerClick = true
     @AppStorage(PrefKey.gazeSnap) private var snap = true
     @AppStorage(PrefKey.gazeSnapRadius) private var snapRadius = 150.0
 
@@ -295,6 +296,13 @@ struct GazeSettings: View {
             Toggle("Blink to click", isOn: $blinkClick)
             if blinkClick {
                 Text("Any blink or wink clicks where you were pointing just before your eyes closed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Toggle("Pucker lips to click", isOn: $puckerClick)
+            if puckerClick {
+                Text("Purse your lips (kiss face) for a quarter second and release. A long \u{201C}oo\u{201D} while talking can also trigger it - pause head control while dictating long text.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
