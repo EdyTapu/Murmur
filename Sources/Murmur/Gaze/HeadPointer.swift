@@ -61,6 +61,16 @@ struct HeadBounds: Codable, Equatable {
     }
 }
 
+/// Spread of the middle 80% of values (outlier-trimmed max minus min).
+/// Used by the calibration dwell detector: raw max-min let one bad landmark
+/// frame block the "pose held" check for a whole window.
+func robustSpread(_ values: [CGFloat]) -> Double {
+    guard values.count >= 5 else { return .infinity }
+    let sorted = values.sorted()
+    let trim = max(1, values.count / 10)
+    return Double(sorted[sorted.count - 1 - trim] - sorted[trim])
+}
+
 /// Maps head-pointing measures to screen points, relative to a captured
 /// neutral pose. Two modes: a calibrated `HeadBounds` range map when the
 /// user has swept the screen edges, else the simple gain map (sensitivity

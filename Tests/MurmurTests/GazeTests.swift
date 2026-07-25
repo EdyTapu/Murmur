@@ -162,6 +162,26 @@ import Testing
     }
 }
 
+@Suite struct RobustSpreadTests {
+    @Test func ignoresOutlierFrames() {
+        // 18 samples of a steady pose + 2 landmark spikes: raw max-min would
+        // read 0.5, but the trimmed spread must see the steady pose.
+        var values: [CGFloat] = (0..<18).map { CGFloat($0 % 3) * 0.005 }
+        values.append(0.5)
+        values.append(-0.5)
+        #expect(robustSpread(values) < 0.02)
+    }
+
+    @Test func seesGenuineMovement() {
+        let sweep: [CGFloat] = (0..<20).map { CGFloat($0) * 0.01 }
+        #expect(robustSpread(sweep) > 0.1)
+    }
+
+    @Test func tooFewSamplesNeverReadsStable() {
+        #expect(robustSpread([0.1, 0.1, 0.1]) == .infinity)
+    }
+}
+
 @Suite struct EyeAspectRatioTests {
     @Test func openEyeReadsTallerThanClosed() {
         let open: [CGPoint] = [

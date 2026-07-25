@@ -75,9 +75,17 @@ final class GazeController: ObservableObject {
     private var calibCaptured: [BoundsStep: CGPoint] = [:]
     private var calibSettleUntil: TimeInterval = 0
     private var calibStartedAt: TimeInterval = 0
+    /// When the current step began accepting samples (drives relaxation).
+    private var calibStepStartedAt: TimeInterval = 0
     private let calibWindowSize = 20
-    /// Pose is "held" when the measure spread over the window stays inside this.
-    private let calibStableSpread = 0.014
+    /// Pose is "held" when the outlier-trimmed spread stays inside this.
+    /// 0.025 matches real micro-sway + landmark noise; the first cut (0.014
+    /// raw max-min) was stricter than a human head can hold and the bar
+    /// stuck forever on the first target.
+    private let calibStableSpread = 0.025
+    /// The threshold relaxes by this much every 4s stuck on a step, so
+    /// calibration always progresses (capped at 2x the base).
+    private let calibRelaxPer4s = 0.006
     /// Edge poses must differ from centre by at least this on the step's axis.
     private let calibMinEdgeDelta = 0.02
 
@@ -329,6 +337,7 @@ final class GazeController: ObservableObject {
         let now = CACurrentMediaTime()
         calibSettleUntil = now + 1.0
         calibStartedAt = now
+        calibStepStartedAt = now + 1.0
         let model = BoundsCalibrationModel()
         calibModel = model
         let window = BoundsCalibrationWindowController()
@@ -372,9 +381,14 @@ final class GazeController: ObservableObject {
 
         let xs = calibBuffer.map(\.x)
         let ys = calibBuffer.map(\.y)
-        let spread = max(
-            (xs.max() ?? 0) - (xs.min() ?? 0), (ys.max() ?? 0) - (ys.min() ?? 0))
-        let held = Double(spread) <= calibStableSpread
+        let spread = max(robustSpread(xs), robustSpread(ys))
+        // Relax the stillness bar the longer the user is stuck, so a shaky
+        // setup still completes (the captured value is a median anyway).
+        let stuckFor = now - calibStepStartedAt
+        let threshold = min(
+            calibStableSpread * 2,
+            calibStableSpread + calibRelaxPer4s * (stuckFor / 4).rounded(.down))
+        let held = spread <= threshold
         let median = CGPoint(x: Self.median(xs), y: Self.median(ys))
 
         // Edge steps must actually differ from centre on their axis, so
@@ -391,7 +405,10 @@ final class GazeController: ObservableObject {
             }
         }
         guard held, distinctEnough else {
-            model.progress = 0.5
+            // Honest feedback: show how close to "held" the pose is instead
+            // of a frozen half bar.
+            let closeness = distinctEnough ? min(1, threshold / max(spread, 1e-6)) : 0
+            model.progress = 0.5 + 0.45 * closeness
             return
         }
         model.progress = 1
@@ -407,6 +424,7 @@ final class GazeController: ObservableObject {
             model.progress = 0
             calibBuffer = []
             calibSettleUntil = now + 0.9
+            calibStepStartedAt = now + 0.9
         } else {
             finishBoundsCalibration()
         }
