@@ -30,8 +30,11 @@ final class GazeController: ObservableObject {
     private var tracker: FaceTracker?
     private var camera: GazeCamera?
     private var pointer = HeadPointer(gain: Prefs.headSensitivity)
-    private var filterX = OneEuroFilter(minCutoff: 0.8, beta: 1.2)
-    private var filterY = OneEuroFilter(minCutoff: 0.8, beta: 1.2)
+    /// Head tuning: higher cutoff + strong beta = the filter opens right up
+    /// on deliberate motion (the "cursor slogs behind" fix) while still
+    /// settling at rest; the head signal is clean enough to afford it.
+    private var filterX = OneEuroFilter(minCutoff: 1.5, beta: 3.0)
+    private var filterY = OneEuroFilter(minCutoff: 1.5, beta: 3.0)
     /// Last few raw mapped points; a component-wise median kills the
     /// single-frame landmark spikes that One Euro alone would let through.
     private var recentRaw: [CGPoint] = []
@@ -100,6 +103,11 @@ final class GazeController: ObservableObject {
         default:
             cameraDenied()
         }
+    }
+
+    /// Live sensitivity change from the Settings slider - no session restart.
+    func applySensitivity() {
+        pointer.gain = Prefs.headSensitivity
     }
 
     /// Capture the current pose as the new neutral (cursor lands at screen

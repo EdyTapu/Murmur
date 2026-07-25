@@ -59,13 +59,17 @@ import Testing
         #expect(headUp.y < screen.midY)
     }
 
-    @Test func gainScalesTravelInScreenHeights() throws {
+    @Test func gainScalesPerAxisWithScreenSize() throws {
         var pointer = HeadPointer(gain: 2.0)
         pointer.recenter(to: .zero)
-        let point = try #require(
+        // Horizontal travel scales with screen WIDTH (an ultrawide must not
+        // take more head turn to cross than a tall screen), vertical with height.
+        let acrossX = try #require(
             pointer.screenPoint(for: CGPoint(x: -0.1, y: 0), on: screen))
-        // 0.1 measure * gain 2 * height 1117 = 223.4pt of travel.
-        #expect(abs((point.x - screen.midX) - 0.1 * 2.0 * screen.height) < 0.001)
+        #expect(abs((acrossX.x - screen.midX) - 0.1 * 2.0 * screen.width) < 0.001)
+        let acrossY = try #require(
+            pointer.screenPoint(for: CGPoint(x: 0, y: 0.1), on: screen))
+        #expect(abs((screen.midY - acrossY.y) - 0.1 * 2.0 * screen.height) < 0.001)
     }
 
     @Test func clampsToScreen() throws {

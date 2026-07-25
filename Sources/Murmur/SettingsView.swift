@@ -264,10 +264,13 @@ struct GazeSettings: View {
 
             Divider()
 
-            Slider(value: $sensitivity, in: 1.5...8, step: 0.5) {
+            Slider(value: $sensitivity, in: 1...10, step: 0.5) {
                 Text("Sensitivity: \(sensitivity, specifier: "%.1f")")
             }
-            Text("Higher = smaller head movements sweep the whole screen. Takes effect next session.")
+            .onChange(of: sensitivity) {
+                gaze.applySensitivity()
+            }
+            Text("Higher = smaller head movements sweep the whole screen. Applies immediately - adjust while a session is running to dial in the feel.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

@@ -67,9 +67,10 @@ final class GazeCamera: NSObject, @unchecked Sendable {
         session.addOutput(output)
         session.commitConfiguration()
 
-        // ~15 fps is plenty for gaze and keeps CPU + pipe traffic low.
+        // 30 fps halves the sample interval vs the old 15 - visibly lower
+        // cursor lag, and Vision landmarks are cheap enough on Apple silicon.
         if (try? device.lockForConfiguration()) != nil {
-            device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 15)
+            device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
             device.unlockForConfiguration()
         }
         configured = true

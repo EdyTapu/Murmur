@@ -5,9 +5,10 @@ import Foundation
 /// facing when the session starts (or on Recenter) and lands the cursor at
 /// the screen centre; turning the head steers away from it.
 struct HeadPointer {
-    /// Cursor travel in screen-heights per unit of head measure (the
-    /// Settings "sensitivity" slider). Screen height on both axes keeps the
-    /// gain isotropic.
+    /// Cursor travel in screen-widths (x) / screen-heights (y) per unit of
+    /// head measure (the Settings "sensitivity" slider). Per-axis scaling
+    /// means the same comfortable head turn spans the full screen in each
+    /// direction - on an ultrawide, height-based x gain felt like slogging.
     var gain: Double
 
     private(set) var neutral: CGPoint?
@@ -27,7 +28,7 @@ struct HeadPointer {
     /// coords are top-left - so both axes invert.
     func screenPoint(for measure: CGPoint, on screen: CGRect) -> CGPoint? {
         guard let neutral, screen.width > 1, screen.height > 1 else { return nil }
-        let dx = -(measure.x - neutral.x) * gain * screen.height
+        let dx = -(measure.x - neutral.x) * gain * screen.width
         let dy = -(measure.y - neutral.y) * gain * screen.height
         return CGPoint(
             x: min(max(screen.midX + dx, screen.minX), screen.maxX - 1),
