@@ -17,12 +17,15 @@ final class GazeController: ObservableObject {
     enum State: Equatable {
         case off
         case starting
+        case calibrating
         case tracking
     }
 
     private let log = Logger(subsystem: "com.alessio.murmur", category: "gaze")
 
     @Published private(set) var state: State = .off
+    /// Whether a saved edge-sweep range calibration is in use.
+    @Published private(set) var boundsCalibrated = Prefs.headBounds != nil
 
     /// Surface toasts through the shared HUD (wired up by AppController).
     var toast: ((Bool, String) -> Void)?
@@ -30,11 +33,16 @@ final class GazeController: ObservableObject {
     private var tracker: FaceTracker?
     private var camera: GazeCamera?
     private var pointer = HeadPointer(gain: Prefs.headSensitivity)
-    /// Head tuning: higher cutoff + strong beta = the filter opens right up
-    /// on deliberate motion (the "cursor slogs behind" fix) while still
-    /// settling at rest; the head signal is clean enough to afford it.
-    private var filterX = OneEuroFilter(minCutoff: 1.5, beta: 3.0)
-    private var filterY = OneEuroFilter(minCutoff: 1.5, beta: 3.0)
+    /// Head tuning, round 3: 1.5/3.0 fixed the lag but let raw landmark
+    /// noise shake the cursor across the screen ("very buggy and jitters").
+    /// 1.0/1.5 is the middle ground now that FaceTracker averages the whole
+    /// nose crest and a deadband eats the residual shimmer.
+    private var filterX = OneEuroFilter(minCutoff: 1.0, beta: 1.5)
+    private var filterY = OneEuroFilter(minCutoff: 1.0, beta: 1.5)
+    /// Last cursor position actually posted; movements under the deadband
+    /// are dropped so the cursor holds perfectly still at rest.
+    private var lastPosted: CGPoint?
+    private let deadbandPx: CGFloat = 3
     /// Last few raw mapped points; a component-wise median kills the
     /// single-frame landmark spikes that One Euro alone would let through.
     private var recentRaw: [CGPoint] = []
@@ -56,10 +64,28 @@ final class GazeController: ObservableObject {
     private var neutralSamples: [CGPoint]?
     private let neutralSampleCount = 10
 
+    // MARK: - Range calibration state
+
+    /// Set when Calibrate Range was clicked while off: run it once tracking starts.
+    private var pendingCalibration = false
+    private var calibModel: BoundsCalibrationModel?
+    private var calibWindow: BoundsCalibrationWindowController?
+    /// Rolling recent measures for the current step (~0.7s at 30fps).
+    private var calibBuffer: [CGPoint] = []
+    private var calibCaptured: [BoundsStep: CGPoint] = [:]
+    private var calibSettleUntil: TimeInterval = 0
+    private var calibStartedAt: TimeInterval = 0
+    private let calibWindowSize = 20
+    /// Pose is "held" when the measure spread over the window stays inside this.
+    private let calibStableSpread = 0.014
+    /// Edge poses must differ from centre by at least this on the step's axis.
+    private let calibMinEdgeDelta = 0.02
+
     var statusText: String {
         switch state {
         case .off: return "Head control off"
         case .starting: return "Starting head control…"
+        case .calibrating: return "Calibrating range…"
         case .tracking: return "Head control on - blink to click"
         }
     }
@@ -110,6 +136,24 @@ final class GazeController: ObservableObject {
         pointer.gain = Prefs.headSensitivity
     }
 
+    /// Run the dot-free range calibration (centre + four screen edges,
+    /// dwell-captured). Starts the camera first if no session is running.
+    func calibrateBounds() {
+        if state == .off {
+            pendingCalibration = true
+            start()
+        } else if state == .tracking {
+            beginBoundsCalibration()
+        }
+    }
+
+    /// Drop the saved range and fall back to the sensitivity slider.
+    func clearBounds() {
+        Prefs.setHeadBounds(nil)
+        pointer.bounds = nil
+        boundsCalibrated = false
+    }
+
     /// Capture the current pose as the new neutral (cursor lands at screen
     /// centre when holding it). Starts a session when off.
     func recenter() {
@@ -126,6 +170,8 @@ final class GazeController: ObservableObject {
         state = .off
         readyTimeoutTask?.cancel()
         readyTimeoutTask = nil
+        closeCalibrationUI()
+        pendingCalibration = false
         camera?.stop()
         camera = nil
         tracker = nil
@@ -136,6 +182,7 @@ final class GazeController: ObservableObject {
         recentRaw.removeAll()
         recentEARs.removeAll()
         trail.removeAll()
+        lastPosted = nil
         if let toastMessage, !wasOff { toast?(true, toastMessage) }
     }
 
@@ -151,7 +198,8 @@ final class GazeController: ObservableObject {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         state = .starting
         screenRect = Self.cgRect(of: screen)
-        pointer = HeadPointer(gain: Prefs.headSensitivity)
+        pointer = HeadPointer(gain: Prefs.headSensitivity, bounds: Prefs.headBounds)
+        boundsCalibrated = pointer.bounds != nil
         neutralSamples = []
         blink = BlinkDetector(minHold: 0.1)
         recentEARs = []
@@ -211,11 +259,20 @@ final class GazeController: ObservableObject {
                     readyTimeoutTask?.cancel()
                     readyTimeoutTask = nil
                     state = .tracking
-                    toast?(true, "Head control on - blink to click, ⌃⌥E to stop")
+                    if pendingCalibration {
+                        pendingCalibration = false
+                        beginBoundsCalibration()
+                    } else {
+                        toast?(true, "Head control on - blink to click, ⌃⌥E to stop")
+                    }
                 } else {
                     toast?(true, "Recentered")
                 }
             }
+            return
+        }
+        if state == .calibrating {
+            handleCalibration(sample)
             return
         }
         guard state == .tracking else { return }
@@ -252,7 +309,139 @@ final class GazeController: ObservableObject {
 
         trail.append((now, clamped))
         if trail.count > 60 { trail.removeFirst(trail.count - 60) }
+        // Deadband: don't post sub-noise movements, so the cursor is rock
+        // still at rest instead of shimmering.
+        if let lastPosted, hypot(clamped.x - lastPosted.x, clamped.y - lastPosted.y) < deadbandPx {
+            return
+        }
+        lastPosted = clamped
         postMouse(.mouseMoved, at: clamped)
+    }
+
+    // MARK: - Range calibration (centre + four edges, dwell-captured)
+
+    private func beginBoundsCalibration() {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        closeCalibrationUI()
+        state = .calibrating
+        calibBuffer = []
+        calibCaptured = [:]
+        let now = CACurrentMediaTime()
+        calibSettleUntil = now + 1.0
+        calibStartedAt = now
+        let model = BoundsCalibrationModel()
+        calibModel = model
+        let window = BoundsCalibrationWindowController()
+        calibWindow = window
+        window.show(on: screen, model: model) { [weak self] in
+            self?.stopSession(toastMessage: "Calibration cancelled")
+        }
+    }
+
+    private func closeCalibrationUI() {
+        calibWindow?.close()
+        calibWindow = nil
+        calibModel = nil
+        calibBuffer = []
+        calibCaptured = [:]
+    }
+
+    private func handleCalibration(_ sample: HeadSample) {
+        guard let model = calibModel else { return }
+        let now = CACurrentMediaTime()
+        model.faceVisible = sample.face
+
+        // Never seeing a stable pose for this long means something is wrong
+        // (bad lighting, camera angle) - bail with a diagnosis.
+        if now - calibStartedAt > 90 {
+            stopSession()
+            toast?(false, "Calibration timed out - check lighting and try again")
+            return
+        }
+        guard sample.face, now >= calibSettleUntil else { return }
+
+        calibBuffer.append(sample.measure)
+        if calibBuffer.count > calibWindowSize {
+            calibBuffer.removeFirst(calibBuffer.count - calibWindowSize)
+        }
+        let filled = Double(calibBuffer.count) / Double(calibWindowSize)
+        guard calibBuffer.count == calibWindowSize else {
+            model.progress = filled * 0.5
+            return
+        }
+
+        let xs = calibBuffer.map(\.x)
+        let ys = calibBuffer.map(\.y)
+        let spread = max(
+            (xs.max() ?? 0) - (xs.min() ?? 0), (ys.max() ?? 0) - (ys.min() ?? 0))
+        let held = Double(spread) <= calibStableSpread
+        let median = CGPoint(x: Self.median(xs), y: Self.median(ys))
+
+        // Edge steps must actually differ from centre on their axis, so
+        // resting at centre can't accidentally capture an edge.
+        var distinctEnough = true
+        if let centre = calibCaptured[.center] {
+            switch model.step {
+            case .left, .right:
+                distinctEnough = abs(Double(median.x - centre.x)) >= calibMinEdgeDelta
+            case .top, .bottom:
+                distinctEnough = abs(Double(median.y - centre.y)) >= calibMinEdgeDelta
+            case .center:
+                break
+            }
+        }
+        guard held, distinctEnough else {
+            model.progress = 0.5
+            return
+        }
+        model.progress = 1
+
+        calibCaptured[model.step] = median
+        if Prefs.soundFeedback {
+            let sound = NSSound(named: "Tink")
+            sound?.volume = 0.25
+            sound?.play()
+        }
+        if let next = BoundsStep(rawValue: model.step.rawValue + 1) {
+            model.step = next
+            model.progress = 0
+            calibBuffer = []
+            calibSettleUntil = now + 0.9
+        } else {
+            finishBoundsCalibration()
+        }
+    }
+
+    private func finishBoundsCalibration() {
+        defer { closeCalibrationUI() }
+        guard let centre = calibCaptured[.center],
+            let left = calibCaptured[.left], let right = calibCaptured[.right],
+            let top = calibCaptured[.top], let bottom = calibCaptured[.bottom]
+        else {
+            stopSession()
+            toast?(false, "Calibration failed - please try again")
+            return
+        }
+        let bounds = HeadBounds(
+            neutral: centre,
+            leftX: Double(left.x), rightX: Double(right.x),
+            topY: Double(top.y), bottomY: Double(bottom.y))
+        guard bounds.isUsable else {
+            stopSession()
+            toast?(false, "Edges weren't distinct enough - try again with bigger head turns")
+            return
+        }
+        Prefs.setHeadBounds(bounds)
+        pointer.bounds = bounds
+        pointer.recenter(to: centre)
+        boundsCalibrated = true
+        filterX.reset()
+        filterY.reset()
+        recentRaw.removeAll()
+        lastPosted = nil
+        state = .tracking
+        toast?(true, "Range calibrated - blink to click, ⌃⌥E to stop")
+        log.info("bounds calibrated: neutral=(\(centre.x, privacy: .public), \(centre.y, privacy: .public)) spans x=[\(bounds.leftX, privacy: .public), \(bounds.rightX, privacy: .public)] y=[\(bounds.bottomY, privacy: .public), \(bounds.topY, privacy: .public)]")
     }
 
     // MARK: - Clicking

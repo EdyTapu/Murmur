@@ -60,21 +60,16 @@ final class FaceTracker: @unchecked Sendable {
             observation.boundingBox, Int(imageSize.width), Int(imageSize.height))
         guard box.width > 1, box.height > 1 else { return nil }
 
-        // Nose tip: the last noseCrest point runs bridge -> tip; fall back to
-        // the nose region centroid if the crest is missing.
-        let nosePoint: CGPoint
-        if let crest = landmarks.noseCrest,
-            let tip = crest.pointsInImage(imageSize: imageSize).last {
-            nosePoint = tip
-        } else if let nose = landmarks.nose {
-            let points = nose.pointsInImage(imageSize: imageSize)
-            guard !points.isEmpty else { return nil }
-            nosePoint = CGPoint(
-                x: points.map(\.x).reduce(0, +) / CGFloat(points.count),
-                y: points.map(\.y).reduce(0, +) / CGFloat(points.count))
-        } else {
-            return nil
-        }
+        // Average ALL noseCrest points (bridge to tip), not just the tip:
+        // the whole crest moves together with head rotation, and the mean of
+        // ~6 landmarks carries ~1/sqrt(6) of the single-point jitter that was
+        // shaking the cursor. Fall back to the nose-region centroid.
+        let region = landmarks.noseCrest ?? landmarks.nose
+        guard let points = region?.pointsInImage(imageSize: imageSize), !points.isEmpty
+        else { return nil }
+        let nosePoint = CGPoint(
+            x: points.map(\.x).reduce(0, +) / CGFloat(points.count),
+            y: points.map(\.y).reduce(0, +) / CGFloat(points.count))
 
         let measure = CGPoint(
             x: (nosePoint.x - box.midX) / box.width,

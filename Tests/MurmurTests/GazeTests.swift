@@ -92,6 +92,76 @@ import Testing
     }
 }
 
+@Suite struct HeadBoundsTests {
+    private let screen = CGRect(x: 0, y: 0, width: 3440, height: 1440)
+    /// Realistic signs: facing screen-left turns the head left, which moves
+    /// the nose toward image-right (+x, unmirrored frames); facing the top
+    /// raises the nose (+y, Vision bottom-left origin).
+    private let bounds = HeadBounds(
+        neutral: CGPoint(x: 0.01, y: -0.02),
+        leftX: 0.13, rightX: -0.09,
+        topY: 0.06, bottomY: -0.12)
+
+    @Test func anchorsMapToCentreAndEdges() {
+        #expect(
+            bounds.screenPoint(for: bounds.neutral, on: screen)
+                == CGPoint(x: screen.midX, y: screen.midY))
+        let left = bounds.screenPoint(
+            for: CGPoint(x: bounds.leftX, y: Double(bounds.neutral.y)), on: screen)
+        #expect(left.x == screen.minX)
+        let top = bounds.screenPoint(
+            for: CGPoint(x: Double(bounds.neutral.x), y: bounds.topY), on: screen)
+        #expect(top.y == screen.minY)
+    }
+
+    @Test func asymmetricRangesInterpolatePerSide() {
+        // Halfway between neutral and the right-edge measure = 3/4 across.
+        let m = CGPoint(
+            x: (Double(bounds.neutral.x) + bounds.rightX) / 2,
+            y: Double(bounds.neutral.y))
+        let p = bounds.screenPoint(for: m, on: screen)
+        #expect(abs(p.x - (screen.minX + 0.75 * screen.width)) < 0.001)
+    }
+
+    @Test func clampsBeyondCalibratedEdges() {
+        let far = bounds.screenPoint(for: CGPoint(x: -5, y: 5), on: screen)
+        #expect(far.x == screen.maxX - 1)
+        #expect(far.y == screen.minY)
+    }
+
+    @Test func validationRejectsSameSideEdges() {
+        var bad = bounds
+        bad.rightX = bad.leftX * 0.5  // both edges on the same side of neutral
+        #expect(!bad.isUsable)
+        #expect(bounds.isUsable)
+    }
+
+    @Test func translatePreservesSpans() {
+        var moved = bounds
+        moved.translate(toNeutral: CGPoint(x: 0.05, y: 0.03))
+        #expect(abs((moved.leftX - Double(moved.neutral.x)) - (bounds.leftX - Double(bounds.neutral.x))) < 1e-9)
+        #expect(abs((moved.topY - Double(moved.neutral.y)) - (bounds.topY - Double(bounds.neutral.y))) < 1e-9)
+        // Same relative pose after the seat shift lands at the same pixel.
+        let before = bounds.screenPoint(
+            for: CGPoint(x: bounds.neutral.x + 0.03, y: bounds.neutral.y - 0.04), on: screen)
+        let after = moved.screenPoint(
+            for: CGPoint(x: moved.neutral.x + 0.03, y: moved.neutral.y - 0.04), on: screen)
+        #expect(abs(before.x - after.x) < 0.001)
+        #expect(abs(before.y - after.y) < 0.001)
+    }
+
+    @Test func pointerPrefersBoundsOverGain() throws {
+        var pointer = HeadPointer(gain: 3.5, bounds: bounds)
+        pointer.recenter(to: bounds.neutral)
+        let p = try #require(pointer.screenPoint(for: bounds.neutral, on: screen))
+        #expect(p == CGPoint(x: screen.midX, y: screen.midY))
+        let edge = try #require(
+            pointer.screenPoint(
+                for: CGPoint(x: bounds.leftX, y: Double(bounds.neutral.y)), on: screen))
+        #expect(edge.x == screen.minX)
+    }
+}
+
 @Suite struct EyeAspectRatioTests {
     @Test func openEyeReadsTallerThanClosed() {
         let open: [CGPoint] = [

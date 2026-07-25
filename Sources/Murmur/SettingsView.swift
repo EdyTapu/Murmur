@@ -257,22 +257,40 @@ struct GazeSettings: View {
                     gaze.recenter()
                 }
                 .disabled(gaze.state == .off)
+                Button("Calibrate Range…") {
+                    gaze.calibrateBounds()
+                }
+                .disabled(gaze.state == .starting || gaze.state == .calibrating)
             }
-            Text("Recenter captures your current pose as \u{201C}cursor at screen centre\u{201D}.")
+            Text("Recenter captures your current pose as \u{201C}cursor at screen centre\u{201D}. Calibrate Range walks you through facing the centre and each screen edge (hold each pose, no blinking needed) so your natural head sweep maps to the whole screen.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             Divider()
 
-            Slider(value: $sensitivity, in: 1...10, step: 0.5) {
-                Text("Sensitivity: \(sensitivity, specifier: "%.1f")")
+            if gaze.boundsCalibrated {
+                HStack {
+                    Label("Range calibrated", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Button("Clear Range") {
+                        gaze.clearBounds()
+                    }
+                }
+                Text("Your edge sweep maps to the full screen; the sensitivity slider is not used. Clear it to go back to slider control.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Slider(value: $sensitivity, in: 1...10, step: 0.5) {
+                    Text("Sensitivity: \(sensitivity, specifier: "%.1f")")
+                }
+                .onChange(of: sensitivity) {
+                    gaze.applySensitivity()
+                }
+                Text("Higher = smaller head movements sweep the whole screen. Applies immediately - adjust while a session is running to dial in the feel.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .onChange(of: sensitivity) {
-                gaze.applySensitivity()
-            }
-            Text("Higher = smaller head movements sweep the whole screen. Applies immediately - adjust while a session is running to dial in the feel.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
 
             Toggle("Blink to click", isOn: $blinkClick)
             if blinkClick {
