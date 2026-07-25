@@ -140,9 +140,7 @@ struct HomeSection: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(gaze.statusText)
                     .font(.headline)
-                Text(gaze.isInstalled
-                    ? "Look to move the cursor, blink to click · ⌃⌥E toggles anywhere."
-                    : "One-time setup needed - see Settings → Eye.")
+                Text("Point your face to move the cursor, blink to click · ⌃⌥E toggles anywhere.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -150,11 +148,10 @@ struct HomeSection: View {
             Button(gaze.state == .off ? "Start" : "Stop") {
                 gaze.toggle()
             }
-            .disabled(!gaze.isInstalled)
-            Button("Recalibrate") {
-                gaze.recalibrate()
+            Button("Recenter") {
+                gaze.recenter()
             }
-            .disabled(!gaze.isInstalled)
+            .disabled(gaze.state == .off)
         }
         .padding(16)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))

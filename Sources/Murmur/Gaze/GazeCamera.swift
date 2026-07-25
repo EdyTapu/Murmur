@@ -2,15 +2,14 @@
 import Foundation
 import os
 
-/// Owns the webcam during an eye-control session: 640x480 BGRA at ~15 fps,
-/// delivered as raw frames for the gaze helper. Capture lives in Murmur (not
-/// the Python child) so the camera permission, the entitlement, and the
-/// green camera light all belong to Murmur.app - same TCC recipe as the mic.
+/// Owns the webcam during a head-control session: 640x480 BGRA at ~15 fps.
+/// Frames go straight to the Vision tracker as CVPixelBuffers - no copy.
 final class GazeCamera: NSObject, @unchecked Sendable {
     private static let log = Logger(subsystem: "com.alessio.murmur", category: "gaze-camera")
 
-    /// Called on the capture queue with (width, height, bytesPerRow, BGRA pixels).
-    var onFrame: (@Sendable (Int, Int, Int, Data) -> Void)?
+    /// Called synchronously on the capture queue with each frame;
+    /// `alwaysDiscardsLateVideoFrames` provides the backpressure.
+    var onFrame: (@Sendable (CVPixelBuffer) -> Void)?
 
     private let session = AVCaptureSession()
     private let queue = DispatchQueue(label: "com.alessio.murmur.gaze-camera")
@@ -87,13 +86,6 @@ extension GazeCamera: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let onFrame,
             let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
         else { return }
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        onFrame(
-            CVPixelBufferGetWidth(pixelBuffer), height, bytesPerRow,
-            Data(bytes: base, count: bytesPerRow * height))
+        onFrame(pixelBuffer)
     }
 }

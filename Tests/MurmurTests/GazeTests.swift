@@ -26,52 +26,94 @@ import Testing
     }
 }
 
-@Suite struct GazeMapperTests {
-    /// Synthetic ground truth: gaze target is a noiseless linear function of
-    /// the iris features. The fit should recover it almost exactly.
-    @Test func recoversLinearMap() throws {
-        var rng = SystemRandomNumberGenerator()
-        var features: [[Double]] = []
-        var targets: [CGPoint] = []
-        for _ in 0..<200 {
-            let f = (0..<GazeMapper.rawDimension).map { i -> Double in
-                switch i {
-                case 0...3: return Double.random(in: -0.15...0.15, using: &rng)
-                case 4...6: return Double.random(in: -0.3...0.3, using: &rng)
-                default: return Double.random(in: -5...5, using: &rng)
-                }
-            }
-            let u = 0.5 + 2.0 * (f[0] + f[2]) + 0.3 * f[4]
-            let v = 0.5 + 2.5 * (f[1] + f[3]) + 0.3 * f[5]
-            features.append(f)
-            targets.append(CGPoint(x: u, y: v))
-        }
-        let mapper = try #require(GazeMapper.fit(features: features, targets: targets))
-        var worst = 0.0
-        for (f, t) in zip(features, targets) {
-            let p = try #require(mapper.predict(f))
-            worst = max(worst, max(abs(p.x - t.x), abs(p.y - t.y)))
-        }
-        #expect(worst < 0.05)
+@Suite struct HeadPointerTests {
+    private let screen = CGRect(x: 0, y: 0, width: 1728, height: 1117)
+
+    @Test func notReadyBeforeNeutral() {
+        let pointer = HeadPointer(gain: 3.5)
+        #expect(!pointer.isReady)
+        #expect(pointer.screenPoint(for: .zero, on: screen) == nil)
     }
 
-    @Test func refusesTooFewSamples() {
-        let f = [[Double]](repeating: [Double](repeating: 0, count: 10), count: 5)
-        let t = [CGPoint](repeating: .zero, count: 5)
-        #expect(GazeMapper.fit(features: f, targets: t) == nil)
+    @Test func neutralPoseLandsAtScreenCentre() throws {
+        var pointer = HeadPointer(gain: 3.5)
+        pointer.recenter(to: CGPoint(x: 0.04, y: -0.02))
+        let point = try #require(
+            pointer.screenPoint(for: CGPoint(x: 0.04, y: -0.02), on: screen))
+        #expect(point == CGPoint(x: screen.midX, y: screen.midY))
     }
 
-    @Test func roundTripsThroughCodable() throws {
-        let features = (0..<50).map { _ in
-            (0..<10).map { _ in Double.random(in: -1...1) }
-        }
-        let targets = features.map { CGPoint(x: $0[0], y: $0[1]) }
-        let mapper = try #require(GazeMapper.fit(features: features, targets: targets))
-        let data = try JSONEncoder().encode(
-            GazeCalibration(mapper: mapper, screenRect: CGRect(x: 0, y: 0, width: 1728, height: 1117)))
-        let decoded = try JSONDecoder().decode(GazeCalibration.self, from: data)
-        #expect(decoded.mapper == mapper)
-        #expect(decoded.screenRect.width == 1728)
+    /// Frames are unmirrored: turning the head right moves the nose toward
+    /// image-left (measure.x down) and the cursor must move right (+x).
+    /// Vision is bottom-left origin: looking up raises measure.y and the
+    /// cursor must move up, which is -y in CG screen coords.
+    @Test func axesInvertForMirrorAndOrigin() throws {
+        var pointer = HeadPointer(gain: 3.5)
+        pointer.recenter(to: .zero)
+        let headRight = try #require(
+            pointer.screenPoint(for: CGPoint(x: -0.05, y: 0), on: screen))
+        #expect(headRight.x > screen.midX)
+        #expect(headRight.y == screen.midY)
+        let headUp = try #require(
+            pointer.screenPoint(for: CGPoint(x: 0, y: 0.05), on: screen))
+        #expect(headUp.y < screen.midY)
+    }
+
+    @Test func gainScalesTravelInScreenHeights() throws {
+        var pointer = HeadPointer(gain: 2.0)
+        pointer.recenter(to: .zero)
+        let point = try #require(
+            pointer.screenPoint(for: CGPoint(x: -0.1, y: 0), on: screen))
+        // 0.1 measure * gain 2 * height 1117 = 223.4pt of travel.
+        #expect(abs((point.x - screen.midX) - 0.1 * 2.0 * screen.height) < 0.001)
+    }
+
+    @Test func clampsToScreen() throws {
+        var pointer = HeadPointer(gain: 8)
+        pointer.recenter(to: .zero)
+        let far = try #require(
+            pointer.screenPoint(for: CGPoint(x: -5, y: 5), on: screen))
+        #expect(far.x == screen.maxX - 1)
+        #expect(far.y == screen.minY)
+    }
+
+    @Test func offsetScreenClampUsesScreenBounds() throws {
+        let second = CGRect(x: 1728, y: 100, width: 1512, height: 982)
+        var pointer = HeadPointer(gain: 8)
+        pointer.recenter(to: .zero)
+        let far = try #require(
+            pointer.screenPoint(for: CGPoint(x: 5, y: -5), on: second))
+        #expect(far.x == second.minX)
+        #expect(far.y == second.maxY - 1)
+    }
+}
+
+@Suite struct EyeAspectRatioTests {
+    @Test func openEyeReadsTallerThanClosed() {
+        let open: [CGPoint] = [
+            CGPoint(x: 0, y: 5), CGPoint(x: 10, y: 12), CGPoint(x: 20, y: 14),
+            CGPoint(x: 30, y: 12), CGPoint(x: 40, y: 5), CGPoint(x: 20, y: 0),
+        ]
+        let closed: [CGPoint] = [
+            CGPoint(x: 0, y: 5), CGPoint(x: 10, y: 6), CGPoint(x: 20, y: 6.5),
+            CGPoint(x: 30, y: 6), CGPoint(x: 40, y: 5), CGPoint(x: 20, y: 4.5),
+        ]
+        let openEAR = FaceTracker.aspectRatio(of: open)
+        let closedEAR = FaceTracker.aspectRatio(of: closed)
+        #expect(openEAR > 0.3)
+        #expect(closedEAR < 0.1)
+        #expect(openEAR > closedEAR * 3)
+    }
+
+    @Test func degenerateInputsReturnZero() {
+        #expect(FaceTracker.aspectRatio(of: []) == 0)
+        #expect(FaceTracker.aspectRatio(of: [CGPoint(x: 1, y: 1)]) == 0)
+        // Zero width must not divide by zero.
+        let vertical = [
+            CGPoint(x: 5, y: 0), CGPoint(x: 5, y: 1),
+            CGPoint(x: 5, y: 2), CGPoint(x: 5, y: 3),
+        ]
+        #expect(FaceTracker.aspectRatio(of: vertical) == 0)
     }
 }
 

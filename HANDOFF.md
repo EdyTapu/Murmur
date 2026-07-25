@@ -63,28 +63,24 @@ Pipeline: hotkey → record → transcribe → clean → insert → history.
   The dashboard reuses the same `GeneralSettings`/`CleanupSettings`/`DictionarySettings`/`SnippetSettings` views.
 - `MurmurCLI` (`swift run murmur-cli file.wav`) - headless harness that runs the exact same STT stack; used for latency/pipeline verification without the GUI.
 
-## Eye control (v1, 2026-07-23)
+## Head control (v2, 2026-07-24 - was "eye control")
 
-Press **⌃⌥E** to toggle an eye-control session: the cursor follows your gaze, and **any blink or wink clicks** (v1.2, 2026-07-23: the session detector runs minHold 0 on `min(earL, earR)`, so a quick natural blink or a one-eyed wink fires on reopen; only closures past 2s are ignored as resting).
-First session shows a fullscreen 9-point calibration overlay (esc cancels); the calibration persists in UserDefaults.
-Calibration is **user-paced and blink-confirmed** (2026-07-23 v1.1): each dot buffers gaze samples, then waits for a blink and captures the samples from just before the eyelids moved - nothing advances until the user blinks, and the flow doubles as blink-click practice. Dot capture keeps a small 0.15s minimum hold so a stray natural blink doesn't grab a dot early.
-The median open-eye EAR (of the narrower eye, matching the session's min-EAR signal) measured during calibration is stored (`GazeCalibration.openEAR`) and seeds the session `BlinkDetector`, so blink-to-click works from the first blink even for narrow or wide eye shapes.
-Recalibrate from the dashboard **Home page card** (Start/Stop + Recalibrate buttons), the menu-bar "Recalibrate Eye Control…", or Settings → Eye.
-Clicks snap to the nearest window title bar or Dock icon within a configurable radius (Settings → Eye), which is what makes coarse webcam gaze reliable for app switching.
+Press **⌃⌥E** to toggle a head-control session: the cursor follows **where your face is pointing** (not iris gaze - v1's webcam gaze was too noisy), and any blink or wink clicks.
+**v2 is fully native Swift on Apple Vision** - the v1 Python/MediaPipe child process, its ~600 MB venv (`app/setup_gaze.sh`), `gaze_helper.py`, `GazeHelperProcess`, ridge-regression `GazeMapper`, and the whole 9-point calibration overlay are DELETED.
+There is **no calibration**: the pose you hold when the session starts becomes "cursor at screen centre"; **Recenter** (dashboard Home card, menu bar, or Settings → Eye) re-captures it (10-sample median while you hold the pose).
+Sensitivity slider in Settings → Eye (default 3.5 screen-heights per head-measure unit; takes effect next session).
+Clicks snap to the nearest window title bar or Dock icon within a configurable radius, same as v1.
 
-One-time setup: `zsh app/setup_gaze.sh` installs a Python venv with MediaPipe (~600 MB) into `~/Library/Application Support/Murmur/gaze-env` plus the `face_landmarker.task` model next to it.
-Already done on this Mac (2026-07-23, anaconda python 3.12).
+Architecture (all in `Sources/Murmur/Gaze/`, no external deps):
 
-Architecture (all new code in `Sources/Murmur/Gaze/`):
+- `GazeCamera` - AVCaptureSession 640x480 BGRA @15fps; hands CVPixelBuffers straight to the tracker on the capture queue (no copies, `alwaysDiscardsLateVideoFrames` is the backpressure). Camera TCC/entitlement/green light belong to Murmur.app.
+- `FaceTracker` - `VNDetectFaceLandmarksRequest` via a `VNSequenceRequestHandler`, synchronous on the camera queue. Emits `HeadSample`: the **head measure** (nose tip offset from the face-box centre, in face-box units - translation-invariant, so only *turning* the head steers) + per-eye EAR (contour height/width in image pixels; box-normalized coords would drift with pose).
+- `HeadPointer` - pure mapping: `screenCentre + (measure - neutral) * gain * screenHeight`, both axes inverted (raw frames are unmirrored: user's right = image left; Vision is bottom-left origin vs CG top-left). Unit-tested including the axis inversions - if the cursor ever moves opposite to the head, the sign reasoning in those tests is where to look.
+- Smoothing: median-of-3 raw points into `OneEuroFilter` (head tuning: minCutoff 0.8, beta 1.2 - the head signal is far cleaner than v1 iris gaze, so the filter can be snappier).
+- Blink clicking: EAR runs through a **median-of-3 window** before `BlinkDetector` (Vision eye contours spike on single frames - without this the session click-storms, seen live: 6 clicks in 1.5s), sessions use **minHold 0.1s** (a real blink is ~100-300ms; single-frame dips are ignored), and a **1s click cooldown** caps the rate. Clicks land where the head pointed ~120ms before the eyelids moved (trail ring buffer).
+- `GazeController` - session state machine (off/starting/tracking), ⌃⌥E via HotkeyCenter, neutral capture (start + Recenter share the path), cursor posting via CGEvents, snap-target discovery (CGWindowList title bars + Dock icons via AX).
 
-- **Murmur owns the camera** (`GazeCamera`, AVCaptureSession 640x480 BGRA @15fps) so the Camera TCC grant, the `com.apple.security.device.camera` entitlement, and the green light all belong to Murmur.app - the same hardened-runtime recipe as the mic (see below).
-- `app/gaze_helper.py` (bundled into Resources) is a **pure stdin→stdout child**: raw BGRA frames in, one JSON line of features out (iris-in-eye-box offsets, head pose matrix angles + translation, eye aspect ratios). No camera, no network, no TCC of its own. MediaPipe's legacy `solutions` API is GONE in 0.10.35 - it uses the Tasks `FaceLandmarker` (VIDEO mode, needs the `.task` model path as argv).
-- `GazeHelperProcess` spawns the venv python, drops frames when >2 are in flight (backpressure), drains stderr (glog chatter would otherwise fill the pipe and hang the child).
-- `GazeMapper` - ridge regression from the 10-dim features (+ quadratic iris terms) to normalized screen coords; features are standardized per-column first (iris ~0.1 vs head translation ~tens of cm). Fitted from the 9-point calibration, persisted via `GazeCalibration` (mapper + target screen rect in CG coords).
-- Cursor smoothing is a **median-of-3 prefilter** (kills single-frame landmark spikes) into `OneEuroFilter` (v1.2 tuning: minCutoff 0.3, beta 0.5 - much steadier at fixation than the original 0.8/1.5); `BlinkDetector` turns EAR into click events with an adaptive open-eye baseline + hysteresis; clicks land where the user looked ~120ms *before* the eyelids started moving (positions ring buffer).
-- `GazeController` - session state machine, Carbon `RegisterEventHotKey` for ⌃⌥E (system-wide, consumes the key, no event tap → can't interfere with the dictation tap), calibration driving, cursor posting via CGEvents, snap-target discovery (CGWindowList title bars + Dock icons via AX).
-
-Known v1 limits: single screen (the one calibrated on); recalibrate if you move your laptop or slouch differently; Continuity Camera iPhones may be picked over the built-in camera if active; physical mouse use during a session fights the gaze cursor (stop the session to mouse normally).
+Known v2 limits: single screen (NSScreen.main at session start); physical mouse use during a session fights the head cursor (stop the session to mouse normally); Continuity Camera iPhones may be picked over the built-in camera if active; blink-click still fires on natural blinks by design (toggle off in Settings → Eye if unwanted).
 
 ## Signing & permissions (IMPORTANT)
 

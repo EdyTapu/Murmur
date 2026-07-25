@@ -15,10 +15,10 @@ struct MenuContent: View {
             Button(gazeTitle) {
                 controller.gaze.toggle()
             }
-            Button("Recalibrate Eye Control…") {
-                controller.gaze.recalibrate()
+            Button("Recenter Head Control") {
+                controller.gaze.recenter()
             }
-            .disabled(!controller.gaze.isInstalled)
+            .disabled(controller.gaze.state == .off)
             Divider()
             Button("Open Murmur") {
                 AppShared.mainWindow.show()

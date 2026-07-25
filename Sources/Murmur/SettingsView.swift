@@ -229,6 +229,7 @@ struct CleanupSettings: View {
 struct GazeSettings: View {
     @ObservedObject var controller: AppController
     @ObservedObject var gaze: GazeController
+    @AppStorage(PrefKey.headSensitivity) private var sensitivity = 3.5
     @AppStorage(PrefKey.gazeBlinkClick) private var blinkClick = true
     @AppStorage(PrefKey.gazeSnap) private var snap = true
     @AppStorage(PrefKey.gazeSnapRadius) private var snapRadius = 150.0
@@ -240,53 +241,48 @@ struct GazeSettings: View {
 
     var body: some View {
         Form {
-            if gaze.isInstalled {
-                LabeledContent("Status:") {
-                    Text(gaze.statusText)
-                        .foregroundStyle(gaze.state == .off ? .secondary : Color.green)
+            LabeledContent("Status:") {
+                Text(gaze.statusText)
+                    .foregroundStyle(gaze.state == .off ? .secondary : Color.green)
+            }
+            Text("Press ⌃⌥E to start or stop head control. Point your face where you want the cursor; any blink or wink clicks. Tracking runs fully on-device (Apple Vision). Video never leaves this Mac.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Button(gaze.state == .off ? "Start Head Control" : "Stop Head Control") {
+                    gaze.toggle()
                 }
-                Text("Press ⌃⌥E to start or stop an eye-control session. Look where you want the cursor; any blink or wink clicks.")
+                Button("Recenter") {
+                    gaze.recenter()
+                }
+                .disabled(gaze.state == .off)
+            }
+            Text("Recenter captures your current pose as \u{201C}cursor at screen centre\u{201D}.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            Slider(value: $sensitivity, in: 1.5...8, step: 0.5) {
+                Text("Sensitivity: \(sensitivity, specifier: "%.1f")")
+            }
+            Text("Higher = smaller head movements sweep the whole screen. Takes effect next session.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Toggle("Blink to click", isOn: $blinkClick)
+            if blinkClick {
+                Text("Any blink or wink clicks where you were pointing just before your eyes closed.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
 
-                HStack {
-                    Button(gaze.state == .off ? "Start Eye Control" : "Stop Eye Control") {
-                        gaze.toggle()
-                    }
-                    Button(gaze.isCalibrated ? "Recalibrate…" : "Calibrate…") {
-                        gaze.recalibrate()
-                    }
+            Toggle("Snap clicks to windows and Dock icons", isOn: $snap)
+            if snap {
+                Slider(value: $snapRadius, in: 60...260, step: 10) {
+                    Text("Snap radius: \(Int(snapRadius))px")
                 }
-
-                Divider()
-
-                Toggle("Blink to click", isOn: $blinkClick)
-                if blinkClick {
-                    Text("Any blink or wink clicks where you were looking just before your eyes closed.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Toggle("Snap clicks to windows and Dock icons", isOn: $snap)
-                if snap {
-                    Slider(value: $snapRadius, in: 60...260, step: 10) {
-                        Text("Snap radius: \(Int(snapRadius))px")
-                    }
-                }
-            } else {
-                Text("Eye control isn't set up yet")
-                    .fontWeight(.medium)
-                Text("Run this once in the Murmur folder, then relaunch Murmur:")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("zsh app/setup_gaze.sh")
-                    .font(.system(.callout, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(6)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-                Text("It installs the on-device MediaPipe eye tracker (~600 MB, Python) into Application Support. Video never leaves this Mac.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .padding(20)

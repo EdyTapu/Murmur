@@ -4,19 +4,19 @@ import Carbon.HIToolbox
 import Foundation
 import os
 
-/// Eye control: look where you want the cursor, blink to click.
+/// Head control: point your face where you want the cursor, blink to click.
 ///
-/// Session pipeline: ⌃⌥E → camera frames → gaze_helper.py (MediaPipe) →
-/// feature vector → calibrated ridge map → median + One Euro smoothing →
-/// cursor. Any blink or wink clicks, snapping to the nearest window
-/// title bar or Dock icon so the ~1-2° webcam gaze error still hits the
-/// app you meant. First session runs a 9-point calibration overlay.
+/// Session pipeline: ⌃⌥E → camera frames → Vision face landmarks
+/// (FaceTracker, all on-device Swift - no Python child) → nose-vs-face-box
+/// head measure → neutral-relative HeadPointer map → median + One Euro
+/// smoothing → cursor. Any blink or wink clicks, snapping to the nearest
+/// window title bar or Dock icon. No calibration: the pose you hold when the
+/// session starts becomes "screen centre"; Recenter re-captures it.
 @MainActor
 final class GazeController: ObservableObject {
     enum State: Equatable {
         case off
         case starting
-        case calibrating
         case tracking
     }
 
@@ -27,30 +27,37 @@ final class GazeController: ObservableObject {
     /// Surface toasts through the shared HUD (wired up by AppController).
     var toast: ((Bool, String) -> Void)?
 
-    private var helper: GazeHelperProcess?
+    private var tracker: FaceTracker?
     private var camera: GazeCamera?
-    private var calibration = GazeCalibration.load()
-    private var filterX = OneEuroFilter()
-    private var filterY = OneEuroFilter()
+    private var pointer = HeadPointer(gain: Prefs.headSensitivity)
+    private var filterX = OneEuroFilter(minCutoff: 0.8, beta: 1.2)
+    private var filterY = OneEuroFilter(minCutoff: 0.8, beta: 1.2)
     /// Last few raw mapped points; a component-wise median kills the
     /// single-frame landmark spikes that One Euro alone would let through.
     private var recentRaw: [CGPoint] = []
-    private var blink = BlinkDetector()
+    private var blink = BlinkDetector(minHold: 0.1)
+    /// Median-of-3 EAR window: Vision eye contours spike on single frames,
+    /// and a raw spike below the closed threshold reads as a blink.
+    private var recentEARs: [Double] = []
+    /// Refractory period after a click so a flappy EAR can't click-storm.
+    private var clickCooldownUntil: TimeInterval = 0
     /// Recent smoothed cursor positions - a blink click lands where the user
-    /// was looking just *before* the eyelids started corrupting the iris fit.
+    /// was pointing just *before* the head dipped with the blink.
     private var trail: [(time: TimeInterval, point: CGPoint)] = []
     private var suppressCursorUntil: TimeInterval = 0
     private var readyTimeoutTask: Task<Void, Never>?
+    private var screenRect: CGRect = .zero
 
-    var isInstalled: Bool { GazeHelperProcess.isInstalled }
-    var isCalibrated: Bool { calibration != nil }
+    /// Head measures being averaged into a (new) neutral pose; non-nil while
+    /// capture is in progress (session start and Recenter both use this).
+    private var neutralSamples: [CGPoint]?
+    private let neutralSampleCount = 10
 
     var statusText: String {
         switch state {
-        case .off: return "Eye control off"
-        case .starting: return "Starting eye control…"
-        case .calibrating: return "Calibrating…"
-        case .tracking: return "Eye control on - blink to click"
+        case .off: return "Head control off"
+        case .starting: return "Starting head control…"
+        case .tracking: return "Head control on - blink to click"
         }
     }
 
@@ -71,22 +78,12 @@ final class GazeController: ObservableObject {
         if state == .off {
             start()
         } else {
-            stopSession(toastMessage: "Eye control off")
+            stopSession(toastMessage: "Head control off")
         }
     }
 
-    func start(forceCalibration: Bool = false) {
-        guard state == .off else {
-            if forceCalibration { beginCalibration() }
-            return
-        }
-        guard isInstalled else {
-            toast?(false, "Eye control needs setup - see Settings → Eye")
-            AppShared.mainWindow.show(section: .settings)
-            return
-        }
-        if forceCalibration { calibration = nil }
-
+    func start() {
+        guard state == .off else { return }
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             proceedStart()
@@ -105,12 +102,15 @@ final class GazeController: ObservableObject {
         }
     }
 
-    func recalibrate() {
-        if state == .off {
-            start(forceCalibration: true)
-        } else {
-            beginCalibration()
+    /// Capture the current pose as the new neutral (cursor lands at screen
+    /// centre when holding it). Starts a session when off.
+    func recenter() {
+        guard state != .off else {
+            start()
+            return
         }
+        neutralSamples = []
+        toast?(true, "Recentering - hold your pose…")
     }
 
     func stopSession(toastMessage: String? = nil) {
@@ -118,20 +118,21 @@ final class GazeController: ObservableObject {
         state = .off
         readyTimeoutTask?.cancel()
         readyTimeoutTask = nil
-        closeCalibrationUI()
         camera?.stop()
         camera = nil
-        helper?.stop()
-        helper = nil
+        tracker = nil
+        pointer.reset()
+        neutralSamples = nil
         filterX.reset()
         filterY.reset()
         recentRaw.removeAll()
+        recentEARs.removeAll()
         trail.removeAll()
         if let toastMessage, !wasOff { toast?(true, toastMessage) }
     }
 
     private func cameraDenied() {
-        toast?(false, "Grant Camera access to use eye control")
+        toast?(false, "Grant Camera access to use head control")
         if let url = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera") {
             NSWorkspace.shared.open(url)
@@ -139,253 +140,96 @@ final class GazeController: ObservableObject {
     }
 
     private func proceedStart() {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         state = .starting
-        toast?(true, "Starting eye control…")
+        screenRect = Self.cgRect(of: screen)
+        pointer = HeadPointer(gain: Prefs.headSensitivity)
+        neutralSamples = []
+        blink = BlinkDetector(minHold: 0.1)
+        recentEARs = []
+        toast?(true, "Starting head control - face the screen…")
 
-        let helper = GazeHelperProcess()
-        helper.onReady = { [weak self] in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.helperReady() }
-            }
-        }
-        helper.onSample = { [weak self] sample in
+        let tracker = FaceTracker()
+        tracker.onSample = { [weak self] sample in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.handle(sample) }
             }
         }
-        helper.onExit = { [weak self] status in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, self.state != .off else { return }
-                    self.log.error("gaze helper died mid-session status=\(status, privacy: .public)")
-                    self.stopSession()
-                    self.toast?(false, "Eye tracking stopped unexpectedly")
-                }
-            }
-        }
-
         let camera = GazeCamera()
-        camera.onFrame = { [weak helper] width, height, bytesPerRow, pixels in
-            helper?.send(
-                width: width, height: height, bytesPerRow: bytesPerRow, pixels: pixels)
+        camera.onFrame = { [weak tracker] pixelBuffer in
+            tracker?.process(pixelBuffer)
         }
-
         do {
-            try helper.start()
             try camera.start()
         } catch {
-            helper.stop()
             camera.stop()
             state = .off
-            toast?(false, "Couldn't start eye tracking: \(error.localizedDescription)")
+            toast?(false, "Couldn't start the camera: \(error.localizedDescription)")
             return
         }
-        self.helper = helper
+        self.tracker = tracker
         self.camera = camera
 
-        // MediaPipe imports take a few seconds; give up if the handshake
-        // never arrives (broken venv, wrong python).
+        // If no face ever shows up, stop with a diagnosis instead of hanging.
         readyTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(25))
+            try? await Task.sleep(for: .seconds(15))
             guard let self, !Task.isCancelled, self.state == .starting else { return }
             self.stopSession()
-            self.toast?(false, "Eye tracking helper didn't start - re-run app/setup_gaze.sh")
+            self.toast?(false, "Couldn't find your face - check lighting and try again")
         }
-    }
-
-    private func helperReady() {
-        guard state == .starting else { return }
-        readyTimeoutTask?.cancel()
-        readyTimeoutTask = nil
-        if let calibration {
-            state = .tracking
-            blink = BlinkDetector(baseline: calibration.openEAR ?? 0.26)
-            toast?(true, "Eye control on - blink to click, ⌃⌥E to stop")
-        } else {
-            beginCalibration()
-        }
-    }
-
-    // MARK: - Calibration
-
-    private var calibModel: GazeCalibrationModel?
-    private var calibWindowController: GazeCalibrationWindowController?
-    /// Completed points' samples (one inner array per captured dot).
-    private var calibSamples: [[[Double]]] = []
-    /// Rolling clean samples for the current dot; a blink freezes the ones
-    /// from just before the eyelids moved.
-    private var calibBuffer: [(time: TimeInterval, features: [Double])] = []
-    private var calibBlink = BlinkDetector()
-    private var calibEARs: [Double] = []
-    private var calibScreenCG: CGRect = .zero
-    private var settleUntil: TimeInterval = 0
-    private var lastCleanSampleAt: TimeInterval = 0
-    private let samplesPerPoint = 12
-
-    private func beginCalibration() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
-        closeCalibrationUI()
-        state = .calibrating
-        calibScreenCG = Self.cgRect(of: screen)
-        calibSamples = []
-        calibBuffer = []
-        calibEARs = []
-        // Sessions click on any blink, but capturing a dot keeps a small
-        // minimum hold so a stray natural blink doesn't grab it early.
-        calibBlink = BlinkDetector(minHold: 0.15, maxHold: 1.6)
-        let model = GazeCalibrationModel()
-        calibModel = model
-        let windowController = GazeCalibrationWindowController()
-        calibWindowController = windowController
-        let now = CACurrentMediaTime()
-        settleUntil = now + 1.2
-        lastCleanSampleAt = now
-        windowController.show(on: screen, model: model) { [weak self] in
-            self?.stopSession(toastMessage: "Calibration cancelled")
-        }
-    }
-
-    private func closeCalibrationUI() {
-        calibWindowController?.close()
-        calibWindowController = nil
-        calibModel = nil
-        calibSamples = []
-        calibBuffer = []
-    }
-
-    /// User-paced: each dot waits for a deliberate blink and captures the
-    /// gaze samples from just before it - nothing advances until the user is
-    /// ready, and every dot doubles as blink-click practice.
-    private func handleCalibration(_ sample: GazeSample) {
-        guard let model = calibModel else { return }
-        model.faceVisible = sample.face
-        let now = CACurrentMediaTime()
-
-        // Nothing clean for a long stretch means the tracker can't see the
-        // eyes at all - bail with a diagnosis instead of hanging forever.
-        if now - lastCleanSampleAt > 20 {
-            stopSession()
-            toast?(false, "Couldn't track your eyes - improve lighting and retry")
-            return
-        }
-        guard sample.face else { return }
-
-        let closedAt = calibBlink.closedAt
-        let blinked = calibBlink.process(
-            ear: min(sample.earLeft, sample.earRight), at: now)
-        if blinked {
-            captureCalibrationPoint(blinkStart: closedAt ?? now, at: now)
-            return
-        }
-        // Closing/closed eyes corrupt the iris fit; keep them out of the buffer.
-        if calibBlink.isClosed { return }
-        guard now >= settleUntil,
-            min(sample.earLeft, sample.earRight) > 0.15
-        else { return }
-
-        lastCleanSampleAt = now
-        calibBuffer.append((now, sample.features))
-        if calibBuffer.count > 40 { calibBuffer.removeFirst(calibBuffer.count - 40) }
-        // Track the *narrower* eye - the session blink detector watches
-        // min(earL, earR) so winks count, and the baseline must match.
-        calibEARs.append(min(sample.earLeft, sample.earRight))
-        if calibEARs.count > 500 { calibEARs.removeFirst(calibEARs.count - 500) }
-        model.progress = min(Double(calibBuffer.count) / Double(samplesPerPoint), 1)
-        model.awaitingBlink = calibBuffer.count >= samplesPerPoint
-    }
-
-    private func captureCalibrationPoint(blinkStart: TimeInterval, at now: TimeInterval) {
-        guard let model = calibModel else { return }
-        // Only samples from before the eyelids started descending.
-        let usable = calibBuffer.filter { $0.time <= blinkStart - 0.1 }.suffix(samplesPerPoint)
-        guard usable.count >= 6 else { return }  // blinked too early - keep looking
-
-        calibSamples.append(usable.map(\.features))
-        calibBuffer.removeAll()
-        if Prefs.soundFeedback {
-            let sound = NSSound(named: "Tink")
-            sound?.volume = 0.25
-            sound?.play()
-        }
-        if calibSamples.count == GazeCalibrationModel.points.count {
-            finishCalibration()
-        } else {
-            model.pointIndex = calibSamples.count
-            model.progress = 0
-            model.awaitingBlink = false
-            settleUntil = now + 0.85
-            lastCleanSampleAt = now
-        }
-    }
-
-    private func finishCalibration() {
-        var features: [[Double]] = []
-        var targets: [CGPoint] = []
-        for (index, samples) in calibSamples.enumerated() {
-            for f in samples {
-                features.append(f)
-                targets.append(GazeCalibrationModel.points[index])
-            }
-        }
-        let openEAR = calibEARs.isEmpty ? nil : calibEARs.sorted()[calibEARs.count / 2]
-        closeCalibrationUI()
-        guard let mapper = GazeMapper.fit(features: features, targets: targets) else {
-            stopSession()
-            toast?(false, "Calibration failed - please try again")
-            return
-        }
-        let calibration = GazeCalibration(
-            mapper: mapper, screenRect: calibScreenCG, openEAR: openEAR)
-        calibration.save()
-        self.calibration = calibration
-        filterX.reset()
-        filterY.reset()
-        recentRaw.removeAll()
-        blink = BlinkDetector(baseline: openEAR ?? 0.26)
-        state = .tracking
-        toast?(true, "Calibrated - blink to click, ⌃⌥E to stop")
     }
 
     // MARK: - Tracking
 
-    private func handle(_ sample: GazeSample) {
-        switch state {
-        case .calibrating:
-            handleCalibration(sample)
-        case .tracking:
-            handleTracking(sample)
-        case .off, .starting:
-            break
-        }
-    }
-
-    private func handleTracking(_ sample: GazeSample) {
-        guard let calibration else { return }
+    private func handle(_ sample: HeadSample) {
+        guard state != .off else { return }
         let now = CACurrentMediaTime()
 
-        if Prefs.gazeBlinkClick {
+        // Neutral capture (session start or Recenter): average a short burst
+        // of face measures while the user holds the pose they want centred.
+        if neutralSamples != nil {
+            guard sample.face else { return }
+            neutralSamples?.append(sample.measure)
+            if let samples = neutralSamples, samples.count >= neutralSampleCount {
+                let neutral = CGPoint(
+                    x: Self.median(samples.map(\.x)),
+                    y: Self.median(samples.map(\.y)))
+                pointer.recenter(to: neutral)
+                neutralSamples = nil
+                filterX.reset()
+                filterY.reset()
+                recentRaw.removeAll()
+                if state == .starting {
+                    readyTimeoutTask?.cancel()
+                    readyTimeoutTask = nil
+                    state = .tracking
+                    toast?(true, "Head control on - blink to click, ⌃⌥E to stop")
+                } else {
+                    toast?(true, "Recentered")
+                }
+            }
+            return
+        }
+        guard state == .tracking else { return }
+
+        if Prefs.gazeBlinkClick, sample.face {
             // min(earL, earR) so closing either eye - blink or wink - clicks.
+            recentEARs.append(min(sample.earLeft, sample.earRight))
+            if recentEARs.count > 3 { recentEARs.removeFirst(recentEARs.count - 3) }
             let closedAt = blink.closedAt
-            let clicked = blink.process(
-                ear: min(sample.earLeft, sample.earRight), at: now)
-            if clicked {
-                performClick(lookedAtBefore: closedAt ?? now)
+            let clicked = blink.process(ear: Self.median(recentEARs), at: now)
+            if clicked, now >= clickCooldownUntil {
+                performClick(pointedAtBefore: closedAt ?? now)
                 return
             }
-            // Eyes closed: the iris features are garbage, freeze the cursor.
+            // Mid-blink the landmark fit wobbles; freeze the cursor.
             if blink.isClosed { return }
         }
 
         guard sample.face, now >= suppressCursorUntil,
-            let normalized = calibration.mapper.predict(sample.features)
+            let raw = pointer.screenPoint(for: sample.measure, on: screenRect)
         else { return }
 
-        let rect = calibration.screenRect
-        let u = min(max(normalized.x, 0), 1)
-        let v = min(max(normalized.y, 0), 1)
-        let raw = CGPoint(
-            x: rect.minX + u * rect.width,
-            y: rect.minY + v * rect.height)
         recentRaw.append(raw)
         if recentRaw.count > 3 { recentRaw.removeFirst(recentRaw.count - 3) }
         let median = CGPoint(
@@ -395,8 +239,8 @@ final class GazeController: ObservableObject {
             x: filterX.filter(median.x, at: now),
             y: filterY.filter(median.y, at: now))
         let clamped = CGPoint(
-            x: min(max(smoothed.x, rect.minX), rect.maxX - 1),
-            y: min(max(smoothed.y, rect.minY), rect.maxY - 1))
+            x: min(max(smoothed.x, screenRect.minX), screenRect.maxX - 1),
+            y: min(max(smoothed.y, screenRect.minY), screenRect.maxY - 1))
 
         trail.append((now, clamped))
         if trail.count > 60 { trail.removeFirst(trail.count - 60) }
@@ -405,18 +249,19 @@ final class GazeController: ObservableObject {
 
     // MARK: - Clicking
 
-    private func performClick(lookedAtBefore blinkStart: TimeInterval) {
-        // Where the user was looking ~120ms before the eyelids moved.
+    private func performClick(pointedAtBefore blinkStart: TimeInterval) {
+        // Where the user was pointing ~120ms before the eyelids moved.
         let lookupTime = blinkStart - 0.12
-        let looked = trail.last(where: { $0.time <= lookupTime })?.point
+        let pointed = trail.last(where: { $0.time <= lookupTime })?.point
             ?? trail.first?.point
-        guard var target = looked else { return }
+        guard var target = pointed else { return }
 
         if Prefs.gazeSnap, let snapped = snapTarget(near: target) {
             target = snapped
         }
         let now = CACurrentMediaTime()
         suppressCursorUntil = now + 0.35
+        clickCooldownUntil = now + 1.0
         filterX.reset()
         filterY.reset()
         recentRaw.removeAll()
@@ -431,7 +276,7 @@ final class GazeController: ObservableObject {
             sound?.volume = 0.2
             sound?.play()
         }
-        log.info("gaze click at (\(Int(target.x), privacy: .public), \(Int(target.y), privacy: .public))")
+        log.info("head click at (\(Int(target.x), privacy: .public), \(Int(target.y), privacy: .public))")
     }
 
     private func postMouse(_ type: CGEventType, at point: CGPoint) {
@@ -447,9 +292,9 @@ final class GazeController: ObservableObject {
 
     // MARK: - Snap targets
 
-    /// A webcam can't do pixel-accurate gaze; snapping the click to the
-    /// nearest plausible target (window title bars, Dock icons) is what makes
-    /// "look at an app and blink" reliable.
+    /// Head pointing is coarse; snapping the click to the nearest plausible
+    /// target (window title bars, Dock icons) is what makes "face an app and
+    /// blink" reliable.
     private func snapTarget(near point: CGPoint) -> CGPoint? {
         let radius = Prefs.gazeSnapRadius
         let candidates = windowTitlePoints() + dockIconCenters()
@@ -519,6 +364,11 @@ final class GazeController: ObservableObject {
     }
 
     private static func median(_ values: [CGFloat]) -> CGFloat {
+        let sorted = values.sorted()
+        return sorted[sorted.count / 2]
+    }
+
+    private static func median(_ values: [Double]) -> Double {
         let sorted = values.sorted()
         return sorted[sorted.count / 2]
     }

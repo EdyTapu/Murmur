@@ -21,7 +21,7 @@ enum PrefKey {
     static let gazeBlinkClick = "gazeBlinkClick"
     static let gazeSnap = "gazeSnap"
     static let gazeSnapRadius = "gazeSnapRadius"
-    static let gazeCalibrationData = "gazeCalibrationData"
+    static let headSensitivity = "headSensitivity"
 }
 
 enum HotkeyChoice: String, CaseIterable, Identifiable {
@@ -141,6 +141,11 @@ struct Prefs {
     static var gazeSnapRadius: Double {
         let v = defaults.double(forKey: PrefKey.gazeSnapRadius)
         return v > 0 ? v : 150
+    }
+    /// Head-pointer gain: cursor travel in screen-heights per head-measure unit.
+    static var headSensitivity: Double {
+        let v = defaults.double(forKey: PrefKey.headSensitivity)
+        return v > 0 ? v : 3.5
     }
 
     static func tone(for category: AppCategory) -> Tone {
