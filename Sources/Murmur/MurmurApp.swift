@@ -40,8 +40,21 @@ enum AppShared {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var terminationSignal: DispatchSourceSignal?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        AppShared.controller.prepareToQuit()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("Murmur: applicationDidFinishLaunching")
+        // `pkill Murmur` (what app/launch.sh does) sends SIGTERM, which skips
+        // applicationWillTerminate; route it through a normal quit instead.
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler { NSApp.terminate(nil) }
+        source.resume()
+        terminationSignal = source
         // Must be read synchronously - the current Apple event is only valid
         // while it is being handled.
         let launchedAtLogin = Self.launchedAsLogInItem

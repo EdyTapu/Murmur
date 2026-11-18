@@ -17,6 +17,13 @@ enum TranscriberState: Equatable, Sendable {
 actor Transcriber {
     private let log = Logger(subsystem: "com.alessio.murmur", category: "asr")
     private let manager = UnifiedAsrManager()
+    private var vad: VadManager?
+
+    /// Peak Silero speech probability a clip needs before it is transcribed.
+    /// Parakeet turns short speech-free clips (a key click, a breath) into
+    /// "Yeah." / "Okay."; those peak at 0.24-0.57 here, whispering at ~0.6,
+    /// normal speech at 0.88+ (measured with murmur-cli).
+    static let speechThreshold: Float = 0.5
 
     private(set) var state: TranscriberState = .notLoaded
 
@@ -34,6 +41,12 @@ actor Transcriber {
             // Warm inference compiles the ANE graphs so the first real
             // dictation isn't slow.
             _ = try await manager.transcribe([Float](repeating: 0, count: 16_000))
+            // Dictation still works without the gate, so a failed load is not fatal.
+            do {
+                vad = try await VadManager()
+            } catch {
+                log.error("VAD load failed, speech gate off: \(error.localizedDescription, privacy: .public)")
+            }
             state = .ready
             onState(state)
             log.info("Parakeet Unified ready")
@@ -50,9 +63,14 @@ actor Transcriber {
         return false
     }
 
-    /// Transcribe 16 kHz mono samples.
+    /// Transcribe 16 kHz mono samples. Returns "" when the clip holds no speech.
     func transcribe(_ samples: [Float]) async throws -> String {
         guard state == .ready else { throw ASRError.notInitialized }
+        if let vad, let speech = try? await vad.process(samples).map(\.probability).max(),
+            speech < Self.speechThreshold {
+            log.info("No speech in clip (peak probability \(speech, privacy: .public)); skipping")
+            return ""
+        }
         return try await manager.transcribe(samples)
     }
 }

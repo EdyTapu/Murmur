@@ -20,7 +20,12 @@ setopt NULL_GLOB
 rm -rf "$ROOT/build/"*" "[0-9]".app"
 unsetopt NULL_GLOB
 
-rm -rf "$APP"
+# Assemble and sign in a temp dir outside iCloud, then move the result into
+# place. Signing in place loses a race with iCloud re-stamping the bundle
+# ("detritus not allowed"), and a failed signing would otherwise leave an
+# ad-hoc bundle where the working app was.
+FINAL="$APP"
+APP="$(mktemp -d)/Murmur.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/app/Info.plist" "$APP/Contents/Info.plist"
 cp "$BIN" "$APP/Contents/MacOS/Murmur"
@@ -66,4 +71,7 @@ if [[ "${ALLOW_ADHOC:-}" != "1" ]]; then
     fi
 fi
 
-echo "Built: $APP"
+mkdir -p "$ROOT/build"
+rm -rf "$FINAL"
+mv "$APP" "$FINAL"
+echo "Built: $FINAL"

@@ -42,26 +42,22 @@ struct MurmurCLI {
             _ = try await manager.transcribe([Float](repeating: 0, count: 16_000))
             print(String(format: "warm-up in %.2fs", Date().timeIntervalSince(warmStart)))
 
+            // Same Silero VAD the app uses to reject non-speech before transcribing.
+            let vad = try await VadManager()
+
             for path in args.dropFirst() {
-                let url = URL(fileURLWithPath: path)
-                let file = try AVAudioFile(forReading: url)
-                guard
-                    let buffer = AVAudioPCMBuffer(
-                        pcmFormat: file.processingFormat,
-                        frameCapacity: AVAudioFrameCount(file.length))
-                else {
-                    print("\(path): could not allocate buffer")
-                    continue
-                }
-                try file.read(into: buffer)
-                let duration = Double(file.length) / file.processingFormat.sampleRate
+                let samples = try AudioConverter().resampleAudioFile(URL(fileURLWithPath: path))
+                let duration = Double(samples.count) / 16_000
 
                 let start = Date()
-                let text = try await manager.transcribe(buffer)
+                let text = try await manager.transcribe(samples)
                 let elapsed = Date().timeIntervalSince(start)
+                let vadStart = Date()
+                let speech = try await vad.process(samples).map(\.probability).max() ?? 0
+                let vadElapsed = Date().timeIntervalSince(vadStart)
                 print(String(
-                    format: "%@ (%.1fs audio) -> %.3fs\n  \"%@\"",
-                    (path as NSString).lastPathComponent, duration, elapsed, text))
+                    format: "%@ (%.1fs audio) -> %.3fs, vad %.3fs, speech %.2f\n  \"%@\"",
+                    (path as NSString).lastPathComponent, duration, elapsed, vadElapsed, speech, text))
             }
         } catch {
             print("FAILED: \(error)")

@@ -6,8 +6,17 @@ enum PrefKey {
     static let hotkey = "hotkey"
     static let toggleShortcut = "toggleShortcut"
     static let micDeviceUID = "micDeviceUID"
+    static let micPriority = "micPriority"
     static let fillerRemoval = "fillerRemoval"
     static let aiCleanup = "aiCleanup"
+    static let cleanupLevel = "cleanupLevel"
+    static let muteWhileDictating = "muteWhileDictating"
+    static let historyRetention = "historyRetention"
+    static let syncFolder = "syncFolder"
+    static let spokenPunctuation = "spokenPunctuation"
+    static let contextAwareness = "contextAwareness"
+    static let flowBarAlwaysVisible = "flowBarAlwaysVisible"
+    static let flowBarAnchor = "flowBarAnchor"
     static let tonePersonal = "tonePersonal"
     static let toneWork = "toneWork"
     static let toneEmail = "toneEmail"
@@ -24,6 +33,18 @@ enum PrefKey {
     static let gazeSnapRadius = "gazeSnapRadius"
     static let headSensitivity = "headSensitivity"
     static let headBounds = "headBounds"
+}
+
+/// The user-recordable global shortcuts. The raw value is the UserDefaults key.
+enum ShortcutAction: String, CaseIterable {
+    case toggle = "toggleShortcut"
+    case transform = "transformShortcut"
+    case scratchpad = "scratchpadShortcut"
+
+    var defaultShortcut: ToggleShortcut? {
+        // ⌥S opens the scratchpad, as in Wispr Flow.
+        self == .scratchpad ? ToggleShortcut(keyCode: 1, modifierFlags: .option) : nil
+    }
 }
 
 enum HotkeyChoice: String, CaseIterable, Identifiable {
@@ -54,6 +75,40 @@ enum HotkeyChoice: String, CaseIterable, Identifiable {
         case .fn: return .function
         case .rightCommand: return .command
         case .rightOption: return .option
+        }
+    }
+}
+
+/// How long dictations stay in History.
+enum HistoryRetention: String, CaseIterable, Identifiable {
+    case forever
+    case day
+    case never
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .forever: return "Keep the last 1,000"
+        case .day: return "Delete after 24 hours"
+        case .never: return "Never store"
+        }
+    }
+}
+
+/// How much Murmur edits a dictation.
+enum CleanupLevel: String, CaseIterable, Identifiable {
+    case none
+    case light
+    case medium
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .none: return "None (raw transcript)"
+        case .light: return "Light (fillers, corrections, formatting)"
+        case .medium: return "Medium (Light + AI polish)"
         }
     }
 }
@@ -95,27 +150,60 @@ struct Prefs {
     static var hotkey: HotkeyChoice {
         HotkeyChoice(rawValue: defaults.string(forKey: PrefKey.hotkey) ?? "") ?? .fn
     }
-    /// Optional user-recorded shortcut that toggles hands-free dictation.
-    static var toggleShortcut: ToggleShortcut? {
-        guard let data = defaults.data(forKey: PrefKey.toggleShortcut) else { return nil }
+    static func shortcut(_ action: ShortcutAction) -> ToggleShortcut? {
+        guard let data = defaults.data(forKey: action.rawValue) else { return action.defaultShortcut }
         return try? JSONDecoder().decode(ToggleShortcut.self, from: data)
     }
-    static func setToggleShortcut(_ shortcut: ToggleShortcut?) {
-        if let shortcut, let data = try? JSONEncoder().encode(shortcut) {
-            defaults.set(data, forKey: PrefKey.toggleShortcut)
-        } else {
-            defaults.removeObject(forKey: PrefKey.toggleShortcut)
+    static func setShortcut(_ shortcut: ToggleShortcut?, for action: ShortcutAction) {
+        // Empty data means "removed on purpose"; a missing key gets the default.
+        defaults.set(shortcut.flatMap { try? JSONEncoder().encode($0) } ?? Data(), forKey: action.rawValue)
+    }
+    static var flowBarAlwaysVisible: Bool {
+        defaults.object(forKey: PrefKey.flowBarAlwaysVisible) as? Bool ?? true
+    }
+    /// Where the user dragged the bar (centre of its bottom edge, screen coordinates).
+    static var flowBarAnchor: NSPoint? {
+        defaults.string(forKey: PrefKey.flowBarAnchor).map(NSPointFromString)
+    }
+    static func setFlowBarAnchor(_ point: NSPoint?) {
+        defaults.set(point.map(NSStringFromPoint), forKey: PrefKey.flowBarAnchor)
+    }
+    static var contextAwareness: Bool {
+        defaults.object(forKey: PrefKey.contextAwareness) as? Bool ?? true
+    }
+    /// Microphones in order of preference; the first connected one is used.
+    /// Falls back to the single-mic setting this list replaced.
+    static var micPriority: [AudioInputDevice] {
+        if let data = defaults.data(forKey: PrefKey.micPriority),
+            let list = try? JSONDecoder().decode([AudioInputDevice].self, from: data) {
+            return list
         }
+        let legacy = defaults.string(forKey: PrefKey.micDeviceUID) ?? ""
+        return legacy.isEmpty ? [] : [AudioInputDevice(uid: legacy, name: "Saved microphone")]
+            .map { saved in AudioDevices.inputDevices().first { $0.uid == saved.uid } ?? saved }
     }
-    /// CoreAudio UID of the preferred input device; empty = system default.
-    static var micDeviceUID: String {
-        defaults.string(forKey: PrefKey.micDeviceUID) ?? ""
+    static func setMicPriority(_ list: [AudioInputDevice]) {
+        defaults.set(try? JSONEncoder().encode(list), forKey: PrefKey.micPriority)
     }
-    static var fillerRemoval: Bool {
-        defaults.object(forKey: PrefKey.fillerRemoval) as? Bool ?? true
+    /// Falls back to the two toggles this setting replaced.
+    static var cleanupLevel: CleanupLevel {
+        if let level = CleanupLevel(rawValue: defaults.string(forKey: PrefKey.cleanupLevel) ?? "") { return level }
+        if defaults.bool(forKey: PrefKey.aiCleanup) { return .medium }
+        return defaults.object(forKey: PrefKey.fillerRemoval) as? Bool ?? true ? .light : .none
     }
-    static var aiCleanup: Bool {
-        defaults.bool(forKey: PrefKey.aiCleanup)
+    static var muteWhileDictating: Bool {
+        defaults.object(forKey: PrefKey.muteWhileDictating) as? Bool ?? true
+    }
+    static var historyRetention: HistoryRetention {
+        HistoryRetention(rawValue: defaults.string(forKey: PrefKey.historyRetention) ?? "") ?? .forever
+    }
+    /// Folder (for example in iCloud Drive) that holds the dictionary and
+    /// snippets so several Macs share them; nil keeps them on this Mac.
+    static var syncFolder: URL? {
+        defaults.string(forKey: PrefKey.syncFolder).flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+    }
+    static var spokenPunctuation: Bool {
+        defaults.object(forKey: PrefKey.spokenPunctuation) as? Bool ?? true
     }
     static var silenceAutoStop: Bool {
         defaults.object(forKey: PrefKey.silenceAutoStop) as? Bool ?? true

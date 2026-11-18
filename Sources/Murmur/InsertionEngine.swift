@@ -51,6 +51,32 @@ final class InsertionEngine {
         )
     }
 
+    // MARK: - Selection
+
+    /// The text selected in the frontmost app, or nil when nothing is.
+    func selectedText() async -> String? {
+        if let element = focusedElement() {
+            var ref: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &ref) == .success,
+                let text = ref as? String {
+                // The app answered: an empty answer means nothing is selected.
+                // (Copying then would grab the whole line in some editors.)
+                return text.isEmpty ? nil : text
+            }
+        }
+        // Apps that hide their selection from Accessibility: copy it instead,
+        // leaving the clipboard as it was.
+        guard !IsSecureEventInputEnabled() else { return nil }
+        let pasteboard = NSPasteboard.general
+        let saved = snapshotPasteboard(pasteboard)
+        let before = pasteboard.changeCount
+        guard postCommandKey(8) else { return nil }
+        try? await Task.sleep(for: .milliseconds(150))
+        let copied = pasteboard.changeCount != before ? pasteboard.string(forType: .string) : nil
+        restorePasteboard(pasteboard, items: saved)
+        return copied
+    }
+
     // MARK: - Insertion
 
     func insert(_ text: String, context: TargetContext) async -> InsertionOutcome {
@@ -83,14 +109,7 @@ final class InsertionEngine {
     /// VERIFIED by re-reading - otherwise a silent AX failure followed by a
     /// paste would double-insert.
     private func insertViaAX(_ text: String) -> Bool {
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedRef: CFTypeRef?
-        let focusErr = AXUIElementCopyAttributeValue(
-            systemWide, kAXFocusedUIElementAttribute as CFString, &focusedRef)
-        guard focusErr == .success, let focusedRef,
-            CFGetTypeID(focusedRef) == AXUIElementGetTypeID()
-        else { return false }
-        let element = focusedRef as! AXUIElement
+        guard let element = focusedElement() else { return false }
 
         // Never type into ourselves.
         var pid: pid_t = 0
@@ -118,7 +137,17 @@ final class InsertionEngine {
         return true
     }
 
-    private func stringValue(of element: AXUIElement) -> String? {
+    func focusedElement() -> AXUIElement? {
+        var focusedRef: CFTypeRef?
+        let focusErr = AXUIElementCopyAttributeValue(
+            AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute as CFString, &focusedRef)
+        guard focusErr == .success, let focusedRef,
+            CFGetTypeID(focusedRef) == AXUIElementGetTypeID()
+        else { return nil }
+        return (focusedRef as! AXUIElement)
+    }
+
+    func stringValue(of element: AXUIElement) -> String? {
         var valueRef: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef)
         guard err == .success else { return nil }
@@ -135,7 +164,7 @@ final class InsertionEngine {
         pasteboard.setString(text, forType: .string)
         pasteboard.setString("", forType: Self.concealedType)
 
-        guard postCmdV() else {
+        guard postCommandKey(9) else {
             restorePasteboard(pasteboard, items: saved)
             return false
         }
@@ -174,12 +203,12 @@ final class InsertionEngine {
         pasteboard.writeObjects(restored)
     }
 
-    private func postCmdV() -> Bool {
+    /// Press ⌘ + the key with this virtual key code (9 = V, 8 = C).
+    private func postCommandKey(_ key: CGKeyCode) -> Bool {
         guard let source = CGEventSource(stateID: .combinedSessionState) else { return false }
-        let vKey: CGKeyCode = 9
         guard
-            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true),
-            let keyUp = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false)
+            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
+            let keyUp = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
         else { return false }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand

@@ -8,6 +8,8 @@ enum MainSection: String, CaseIterable, Identifiable {
     case scratchpad
     case dictionary
     case snippets
+    case transforms
+    case headControl
     case settings
 
     var id: String { rawValue }
@@ -19,6 +21,8 @@ enum MainSection: String, CaseIterable, Identifiable {
         case .scratchpad: return "Scratchpad"
         case .dictionary: return "Dictionary"
         case .snippets: return "Snippets"
+        case .transforms: return "Transforms"
+        case .headControl: return "Head Control"
         case .settings: return "Settings"
         }
     }
@@ -30,6 +34,8 @@ enum MainSection: String, CaseIterable, Identifiable {
         case .scratchpad: return "note.text"
         case .dictionary: return "character.book.closed"
         case .snippets: return "text.badge.plus"
+        case .transforms: return "wand.and.stars"
+        case .headControl: return "eye"
         case .settings: return "gearshape"
         }
     }
@@ -55,6 +61,8 @@ final class MainWindowController: NSObject, NSWindowDelegate {
         if let section {
             state.section = section
         }
+        // Edits made on another Mac must be on screen before this one edits the list.
+        AppShared.controller.dictionary.reloadIfChanged()
         NSApp.setActivationPolicy(.regular)
         if window == nil {
             let window = NSWindow(

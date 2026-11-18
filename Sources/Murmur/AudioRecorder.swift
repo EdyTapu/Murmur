@@ -12,13 +12,16 @@ import os
 final class AudioRecorder: @unchecked Sendable {
     private let log = Logger(subsystem: "com.alessio.murmur", category: "audio")
 
-    private let engine = AVAudioEngine()
+    /// Replaced whenever the Mac's input device changes: an engine stays bound
+    /// to the device that was the system default when it was created.
+    private var engine = AVAudioEngine()
     private let lock = NSLock()
     private var buffers: [AVAudioPCMBuffer] = []
     private var collecting = false
     private var tapInstalled = false
     private var lastVoiceAt: Date = .distantPast
     private var peakLevel: Float = 0
+    private var loudestRMS: Float = 0
 
     /// Called on the main queue, throttled, with a 0...1 mic level while collecting.
     var onLevel: (@Sendable (Float) -> Void)?
@@ -29,13 +32,27 @@ final class AudioRecorder: @unchecked Sendable {
 
     private var idlePauseTask: Task<Void, Never>?
 
+    /// The devices and input sample rate the tap was built for. When the Mac's
+    /// input no longer matches, the engine refuses to start (error -10868).
+    /// The engine's I/O unit also spans the output device: after headphones
+    /// become the output, the old engine starts but delivers no input at all.
+    private var tapDevice: AudioDeviceID?
+    private var tapOutputDevice: AudioDeviceID?
+    private var tapSampleRate: Double = 0
+
+    /// True when the Mac's input or output device, or the input's sample rate, changed since the tap was installed.
+    var isStale: Bool {
+        guard tapInstalled, let device = AudioDevices.defaultInputDeviceID() else { return false }
+        return device != tapDevice || AudioDevices.sampleRate(of: device) != tapSampleRate
+            || AudioDevices.defaultOutputDeviceID() != tapOutputDevice
+    }
+
     // MARK: - Lifecycle
 
     /// Install the tap and prepare the engine. Call once after mic permission is granted.
     func prepare() {
         guard !tapInstalled else { return }
         let input = engine.inputNode
-        applyPreferredDevice()
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             log.error("Input node has invalid format; is a microphone available?")
@@ -45,55 +62,21 @@ final class AudioRecorder: @unchecked Sendable {
             self?.handleTap(buffer)
         }
         tapInstalled = true
+        tapDevice = AudioDevices.defaultInputDeviceID()
+        tapOutputDevice = AudioDevices.defaultOutputDeviceID()
+        tapSampleRate = tapDevice.flatMap(AudioDevices.sampleRate(of:)) ?? format.sampleRate
         engine.prepare()
         log.info("Audio tap installed, format \(format.sampleRate, privacy: .public)Hz x\(format.channelCount, privacy: .public)")
     }
 
-    /// Tracks whether a non-default device was applied to the audio unit, so
-    /// reverting to "System default" knows it must set the property back.
-    private var appliedPreferredDevice = false
-
-    /// Point the engine's input audio unit at the preferred mic (Prefs) if one
-    /// is chosen and present; otherwise leave (or restore) the system default.
-    private func applyPreferredDevice() {
-        let uid = Prefs.micDeviceUID
-        var target: AudioDeviceID?
-        var isPreferred = false
-        if !uid.isEmpty {
-            if let device = AudioDevices.deviceID(forUID: uid) {
-                target = device
-                isPreferred = true
-            } else {
-                log.warning("Preferred mic \(uid, privacy: .public) not connected; using system default")
-            }
-        }
-        if target == nil, appliedPreferredDevice {
-            target = AudioDevices.defaultInputDeviceID()
-        }
-        guard var device = target else { return }
-        guard let unit = engine.inputNode.audioUnit else {
-            log.error("Input node has no audio unit; cannot select mic")
-            return
-        }
-        let status = AudioUnitSetProperty(
-            unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-            &device, UInt32(MemoryLayout<AudioDeviceID>.size))
-        if status == noErr {
-            appliedPreferredDevice = isPreferred
-            log.info("Mic set to \(isPreferred ? uid : "system default", privacy: .public)")
-        } else {
-            log.error("Setting mic device failed (status=\(status, privacy: .public))")
-        }
-    }
-
-    /// Re-apply the preferred mic after the user changes it in Settings.
-    /// The tap must be reinstalled because the input format can change.
+    /// Start over on the Mac's current input device. Call while idle.
     func reconfigureInputDevice() {
         engine.stop()
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
         }
+        engine = AVAudioEngine()
         prepare()
     }
 
@@ -120,11 +103,17 @@ final class AudioRecorder: @unchecked Sendable {
     /// hardware spin-up and a main-thread stall gets the hotkey event tap
     /// disabled by macOS.
     func startCollecting(onEngineFailure: @escaping @Sendable () -> Void) {
+        // The input changed while idle (another mic, or a new sample rate): rebuild first.
+        if isStale {
+            log.notice("Input device or format changed; rebuilding the audio engine")
+            reconfigureInputDevice()
+        }
         prepare()
         idlePauseTask?.cancel()
         lock.lock()
         buffers.removeAll()
         peakLevel = 0
+        loudestRMS = 0
         lastVoiceAt = .distantPast
         collecting = true
         lock.unlock()
@@ -135,8 +124,16 @@ final class AudioRecorder: @unchecked Sendable {
             do {
                 try self.engine.start()
             } catch {
-                self.log.error("Engine start failed: \(error.localizedDescription, privacy: .public)")
-                onEngineFailure()
+                // Most start failures are a format the tap no longer matches;
+                // a fresh engine fixes that, so try once more before giving up.
+                self.log.error("Engine start failed: \(error.localizedDescription, privacy: .public); rebuilding")
+                self.reconfigureInputDevice()
+                do {
+                    try self.engine.start()
+                } catch {
+                    self.log.error("Engine start failed again: \(error.localizedDescription, privacy: .public)")
+                    onEngineFailure()
+                }
             }
         }
     }
@@ -194,6 +191,13 @@ final class AudioRecorder: @unchecked Sendable {
         return Date().timeIntervalSince(lastVoiceAt)
     }
 
+    /// False while the microphone has delivered nothing but digital silence.
+    var hasSignal: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return loudestRMS > 0.0001
+    }
+
     var hasDetectedVoice: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -214,6 +218,7 @@ final class AudioRecorder: @unchecked Sendable {
         lock.lock()
         buffers.append(copy)
         if rms > Self.voiceRMSThreshold { lastVoiceAt = Date() }
+        loudestRMS = max(loudestRMS, rms)
         peakLevel = max(peakLevel * 0.7, rms)
         let level = min(1.0, peakLevel * 18)
         let shouldPush = Date().timeIntervalSince(lastLevelPush) > 0.05

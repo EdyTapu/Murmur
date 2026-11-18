@@ -16,6 +16,8 @@ struct SettingsView: View {
                 .tabItem { Label("Dictionary", systemImage: "character.book.closed") }
             SnippetSettings(store: controller.dictionary)
                 .tabItem { Label("Snippets", systemImage: "text.badge.plus") }
+            TransformSettings(store: controller.dictionary)
+                .tabItem { Label("Transforms", systemImage: "wand.and.stars") }
         }
         .frame(width: 520, height: 480)
     }
@@ -26,10 +28,14 @@ struct SettingsView: View {
 struct GeneralSettings: View {
     @ObservedObject var controller: AppController
     @AppStorage(PrefKey.hotkey) private var hotkey = HotkeyChoice.fn.rawValue
-    @AppStorage(PrefKey.micDeviceUID) private var micDeviceUID = ""
+    @State private var micPriority = Prefs.micPriority
     @AppStorage(PrefKey.silenceAutoStop) private var silenceAutoStop = true
     @AppStorage(PrefKey.silenceSeconds) private var silenceSeconds = 2.5
     @AppStorage(PrefKey.soundFeedback) private var soundFeedback = true
+    @AppStorage(PrefKey.muteWhileDictating) private var muteWhileDictating = true
+    @AppStorage(PrefKey.flowBarAlwaysVisible) private var flowBarAlwaysVisible = true
+    @AppStorage(PrefKey.historyRetention) private var historyRetention = HistoryRetention.forever.rawValue
+    @AppStorage(PrefKey.syncFolder) private var syncFolder = ""
     @State private var inputDevices: [AudioInputDevice] = []
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginError: String?
@@ -44,30 +50,58 @@ struct GeneralSettings: View {
             .onChange(of: hotkey) {
                 controller.restartHotkey()
             }
-            Text("Hold to talk; quick-tap for hands-free.")
+            Text("Hold to talk; quick-tap for hands-free. Hold ⌃ as well for Command Mode: speak an instruction for the selected text, or say \u{201C}search for…\u{201D}.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            ToggleShortcutRecorder(controller: controller)
+            ShortcutRecorder(
+                controller: controller, action: .toggle, title: "Toggle dictation:",
+                help: "Press once to start hands-free dictation, again to stop. Combine ⌘, ⌥ or ⌃ with a key, or use a function key.")
+            ShortcutRecorder(
+                controller: controller, action: .transform, title: "Transform selection:",
+                help: "Opens a menu of your transforms and rewrites the selected text with the one you pick.")
+            ShortcutRecorder(
+                controller: controller, action: .scratchpad, title: "Open scratchpad:",
+                help: "Opens the scratchpad from any app.")
 
             Divider()
 
-            Picker("Microphone:", selection: $micDeviceUID) {
-                Text("System default").tag("")
-                ForEach(inputDevices) { device in
-                    Text(device.name).tag(device.uid)
-                }
-                if !micDeviceUID.isEmpty, !inputDevices.contains(where: { $0.uid == micDeviceUID }) {
-                    Text("Saved mic (disconnected)").tag(micDeviceUID)
+            LabeledContent("Microphones:") {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(micPriority.enumerated()), id: \.element.uid) { index, mic in
+                        HStack(spacing: 6) {
+                            Text("\(index + 1). \(mic.label)")
+                                .foregroundStyle(inputDevices.contains { $0.uid == mic.uid } ? .primary : .secondary)
+                            Spacer()
+                            Button { moveMic(index, by: -1) } label: { Image(systemName: "chevron.up") }
+                                .disabled(index == 0)
+                                .help("Move up")
+                            Button { moveMic(index, by: 1) } label: { Image(systemName: "chevron.down") }
+                                .disabled(index == micPriority.count - 1)
+                                .help("Move down")
+                            Button { micPriority.remove(at: index) } label: { Image(systemName: "minus.circle") }
+                                .help("Remove")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    Menu(micPriority.isEmpty ? "System default" : "Add microphone") {
+                        ForEach(inputDevices.filter { device in !micPriority.contains { $0.uid == device.uid } }) { device in
+                            Button(device.label) { micPriority.append(device) }
+                        }
+                    }
+                    .fixedSize()
                 }
             }
-            .onChange(of: micDeviceUID) {
+            .onChange(of: micPriority) {
+                Prefs.setMicPriority(micPriority)
                 controller.applyMicSelection()
             }
             .onAppear {
                 inputDevices = AudioDevices.inputDevices()
+                // A device can be renamed, and an entry saved by an older build has no real name.
+                micPriority = micPriority.map { saved in inputDevices.first { $0.uid == saved.uid } ?? saved }
             }
-            Text("A disconnected mic falls back to the system default until it returns.")
+            Text("Murmur makes the first connected microphone in this list the Mac's input device, and leaves the input alone when the list is empty. It never lets a Bluetooth headset be the input unless you add that headset here, so your headphones keep full audio quality.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -81,6 +115,59 @@ struct GeneralSettings: View {
             }
 
             Toggle("Sound feedback", isOn: $soundFeedback)
+            Toggle("Mute other audio while dictating", isOn: $muteWhileDictating)
+            Toggle("Keep the dictation bar on screen", isOn: $flowBarAlwaysVisible)
+                .onChange(of: flowBarAlwaysVisible) {
+                    controller.hud.refreshIdle()
+                }
+            HStack {
+                Text("Drag the bar anywhere; click it for hands-free dictation.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Reset Position") {
+                    Prefs.setFlowBarAnchor(nil)
+                    controller.hud.refreshIdle()
+                }
+                .controlSize(.small)
+            }
+
+            Divider()
+
+            Picker("History:", selection: $historyRetention) {
+                ForEach(HistoryRetention.allCases) { Text($0.label).tag($0.rawValue) }
+            }
+            .onChange(of: historyRetention) {
+                controller.history.prune()
+            }
+
+            LabeledContent("Sync folder:") {
+                HStack(spacing: 6) {
+                    Text(syncFolder.isEmpty ? "This Mac only" : (syncFolder as NSString).abbreviatingWithTildeInPath)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.secondary)
+                    Button("Choose…") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = true
+                        panel.canChooseFiles = false
+                        panel.canCreateDirectories = true
+                        panel.prompt = "Sync Here"
+                        if panel.runModal() == .OK, let url = panel.url {
+                            syncFolder = url.path
+                            controller.dictionary.relocate(to: url)
+                        }
+                    }
+                    if !syncFolder.isEmpty {
+                        Button("Stop") {
+                            syncFolder = ""
+                            controller.dictionary.relocate(to: nil)
+                        }
+                    }
+                }
+            }
+            Text("Keeps your dictionary and snippets in a shared folder such as iCloud Drive. Choose the same folder in Murmur on your other Macs.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             Divider()
 
@@ -104,20 +191,27 @@ struct GeneralSettings: View {
         }
         .padding(20)
     }
+
+    private func moveMic(_ index: Int, by offset: Int) {
+        micPriority.swapAt(index, index + offset)
+    }
 }
 
 /// "Record Shortcut" field for the hands-free toggle keybind. While recording,
 /// a local key monitor captures the next combo; the registered Carbon hotkey
 /// is suspended so re-recording the current combo works (a registered hotkey
 /// never reaches local monitors). Esc cancels, ⌘/⌥/⌃ or an F-key is required.
-struct ToggleShortcutRecorder: View {
+struct ShortcutRecorder: View {
     @ObservedObject var controller: AppController
-    @State private var shortcut = Prefs.toggleShortcut
+    let action: ShortcutAction
+    let title: String
+    let help: String
+    @State private var shortcut: ToggleShortcut?
     @State private var recording = false
     @State private var monitor: Any?
 
     var body: some View {
-        LabeledContent("Toggle dictation:") {
+        LabeledContent(title) {
             HStack(spacing: 6) {
                 Button {
                     recording ? stopRecording() : startRecording()
@@ -128,8 +222,8 @@ struct ToggleShortcutRecorder: View {
                 if shortcut != nil, !recording {
                     Button {
                         shortcut = nil
-                        Prefs.setToggleShortcut(nil)
-                        controller.restartToggleHotkey()
+                        Prefs.setShortcut(nil, for: action)
+                        controller.restartShortcuts()
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                     }
@@ -138,14 +232,15 @@ struct ToggleShortcutRecorder: View {
                 }
             }
         }
-        Text("Press once to start hands-free dictation, again to stop. Combine ⌘, ⌥ or ⌃ with a key, or use a function key.")
+        .onAppear { shortcut = Prefs.shortcut(action) }
+        Text(help)
             .font(.caption)
             .foregroundStyle(.secondary)
     }
 
     private func startRecording() {
         recording = true
-        controller.suspendToggleHotkey()
+        controller.suspendShortcuts()
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let plainEscape =
                 event.keyCode == 53
@@ -163,7 +258,7 @@ struct ToggleShortcutRecorder: View {
                 return nil
             }
             shortcut = captured
-            Prefs.setToggleShortcut(captured)
+            Prefs.setShortcut(captured, for: action)
             stopRecording()
             return nil
         }
@@ -173,15 +268,16 @@ struct ToggleShortcutRecorder: View {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
         recording = false
-        controller.restartToggleHotkey()
+        controller.restartShortcuts()
     }
 }
 
 // MARK: - Cleanup
 
 struct CleanupSettings: View {
-    @AppStorage(PrefKey.fillerRemoval) private var fillerRemoval = true
-    @AppStorage(PrefKey.aiCleanup) private var aiCleanup = false
+    @AppStorage(PrefKey.cleanupLevel) private var level = Prefs.cleanupLevel.rawValue
+    @AppStorage(PrefKey.spokenPunctuation) private var spokenPunctuation = true
+    @AppStorage(PrefKey.contextAwareness) private var contextAwareness = true
     @AppStorage(PrefKey.tonePersonal) private var tonePersonal = Tone.casual.rawValue
     @AppStorage(PrefKey.toneWork) private var toneWork = Tone.neutral.rawValue
     @AppStorage(PrefKey.toneEmail) private var toneEmail = Tone.formal.rawValue
@@ -189,23 +285,29 @@ struct CleanupSettings: View {
 
     var body: some View {
         Form {
-            Toggle("Remove filler words (um, uh…)", isOn: $fillerRemoval)
-
-            Divider()
-
-            Toggle("AI polish (on-device Apple Intelligence)", isOn: $aiCleanup)
-                .disabled(!LLMCleaner.isAvailable)
+            Picker("Cleanup:", selection: $level) {
+                ForEach(CleanupLevel.allCases) { Text($0.label).tag($0.rawValue) }
+            }
+            Text("Light removes fillers, keeps only your correction (\u{201C}at 2, actually 3\u{201D}), and formats spoken lists. Medium also fixes grammar and matches tone on-device, which adds a moment of latency.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if !LLMCleaner.isAvailable {
-                Text("Apple Intelligence is not available on this Mac, so the AI polish pass is disabled.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Collapses self-corrections (\u{201C}at 2… actually 3\u{201D}), fixes grammar, and matches tone to the app you're dictating into. Adds a moment of latency.")
+                Text("Apple Intelligence is not available on this Mac, so Medium behaves like Light.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            if aiCleanup {
+            Toggle("Spoken punctuation (\u{201C}comma\u{201D}, \u{201C}question mark\u{201D})", isOn: $spokenPunctuation)
+                .disabled(level == CleanupLevel.none.rawValue)
+            Toggle("Match names and code on screen", isOn: $contextAwareness)
+                .disabled(level == CleanupLevel.none.rawValue)
+            Text("Reads the text visible in the app you dictate into so names and identifiers are spelled the same way. It is read on this Mac for one dictation and never stored.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            if level == CleanupLevel.medium.rawValue {
                 Picker("Personal messaging:", selection: $tonePersonal) {
                     ForEach(Tone.allCases) { Text($0.label).tag($0.rawValue) }
                 }
@@ -411,6 +513,58 @@ struct SnippetSettings: View {
                     newExpansion = ""
                 }
                 .disabled(newTrigger.isEmpty || newExpansion.isEmpty)
+            }
+        }
+        .padding(20)
+    }
+}
+
+// MARK: - Transforms
+
+struct TransformSettings: View {
+    @ObservedObject var store: DictionaryStore
+    @State private var newName = ""
+    @State private var newPrompt = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Select text in any app, press the Transform shortcut (Settings), and pick one of these. The rewrite happens on this Mac with Apple Intelligence.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !LLMCleaner.isAvailable {
+                Text("Apple Intelligence is not available on this Mac, so transforms cannot run.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            List {
+                ForEach(store.transforms) { transform in
+                    HStack {
+                        Text(transform.name).fontWeight(.medium)
+                        Spacer()
+                        Text(transform.prompt)
+                            .lineLimit(1)
+                            .foregroundStyle(.secondary)
+                        Button(role: .destructive) {
+                            store.transforms.removeAll { $0.id == transform.id }
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+            }
+
+            HStack {
+                TextField("Name (e.g. Shorten)", text: $newName)
+                    .frame(maxWidth: 160)
+                TextField("Instruction (e.g. Make this half as long)", text: $newPrompt)
+                Button("Add") {
+                    store.transforms.append(Transform(name: newName, prompt: newPrompt))
+                    newName = ""
+                    newPrompt = ""
+                }
+                .disabled(newName.isEmpty || newPrompt.isEmpty)
             }
         }
         .padding(20)

@@ -1,3 +1,4 @@
+import ApplicationServices
 import Foundation
 import Testing
 
@@ -121,5 +122,96 @@ import Testing
         let reloaded = HistoryStore(directory: dir)
         #expect(reloaded.entries.count == 1)
         #expect(reloaded.entries[0].finalText == "final")
+    }
+}
+
+@Suite struct CorrectionLearnerTests {
+    private let known: Set<String> = [
+        "push", "it", "to", "their", "there", "the", "meeting", "tonight", "tomorrow", "row", "joe", "see", "you", "whisper", "flow", "and", "more",
+    ]
+    private func fixes(_ inserted: String, before: String? = nil, after: String) -> [CorrectionLearner.Correction] {
+        CorrectionLearner.corrections(
+            inserted: inserted, baseline: before ?? inserted, current: after,
+            isKnownWord: { known.contains($0.lowercased().trimmingCharacters(in: .punctuationCharacters)) })
+    }
+
+    @Test func learnsARetypedName() {
+        #expect(
+            fixes("Push it to edwardtapu.dev.", after: "Push it to edytapu.dev.")
+                == [.init(heard: "edwardtapu.dev", corrected: "edytapu.dev")])
+    }
+
+    @Test func learnsInsideALargerFieldAndSeveralFixesAtOnce() {
+        let out = fixes(
+            "row joe and whisper flow", before: "Notes: row joe and whisper flow\nmore",
+            after: "Notes: Rojo and Wispr Flow\nmore, typed later")
+        #expect(out == [.init(heard: "row joe", corrected: "Rojo"), .init(heard: "whisper flow", corrected: "Wispr Flow")])
+    }
+
+    @Test func ignoresRewritesOrdinaryWordsAndUnrelatedEdits() {
+        #expect(fixes("See you tonight", after: "See you tomorrow").isEmpty)
+        #expect(fixes("Push it to their", after: "Push it to there").isEmpty)
+        #expect(fixes("the meeting", after: "Zoomcall").isEmpty)
+        // Fixing text that was never dictated teaches nothing.
+        #expect(fixes("See you tonight", before: "edwardtapu.dev See you tonight", after: "edytapu.dev See you tonight").isEmpty)
+        // Sending the message empties the field.
+        #expect(fixes("Push it to edwardtapu.dev.", after: "").isEmpty)
+        #expect(fixes("Push it to edwardtapu.dev.", after: "Push it to edwardtapu.dev. And more").isEmpty)
+    }
+}
+
+@Suite struct DictionaryLearnTests {
+    @MainActor @Test func learnedFixIsAppliedAndReplacesAnOlderOne() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let store = DictionaryStore(directory: dir)
+        store.learn(heard: "edwardtapu.dev", corrected: "edytapoo.dev")
+        store.learn(heard: "edwardtapu.dev", corrected: "edytapu.dev")
+        store.learn(heard: "Edward Tapu.dev", corrected: "edytapu.dev")
+        #expect(
+            DictionaryStore.apply("Put it on edwardtapu.dev now", terms: store.terms, snippets: [])
+                == "Put it on edytapu.dev now")
+        #expect(store.terms.last?.aliases == ["edwardtapu.dev", "Edward Tapu.dev"])
+    }
+}
+
+@Suite struct CorrectionWatcherTests {
+    /// Drives the real polling loop against a fake text field.
+    @MainActor private func watch(_ field: @escaping () -> String, _ learned: @escaping ([CorrectionLearner.Correction]) -> Void)
+        -> CorrectionWatcher {
+        let watcher = CorrectionWatcher()
+        watcher.onLearn = learned
+        watcher.watch(
+            inserted: "Push it to edwardtapu.dev.", in: AXUIElementCreateSystemWide(), read: { _ in field() })
+        return watcher
+    }
+
+    @MainActor @Test func learnsASettledFixWhenTheMessageIsSent() async throws {
+        var field = "Push it to edwardtapu.dev."
+        var learned: [CorrectionLearner.Correction] = []
+        let watcher = watch({ field }, { learned += $0 })
+
+        field = "Push it to edytapu.dev."
+        try await Task.sleep(for: .milliseconds(1100))
+        field = ""  // message sent
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(learned == [.init(heard: "edwardtapu.dev", corrected: "edytapu.dev")])
+        watcher.stop()
+    }
+
+    @MainActor @Test func neverLearnsAHalfTypedWord() async throws {
+        var field = "Push it to edwardtapu.dev."
+        var learned: [CorrectionLearner.Correction] = []
+        let watcher = watch({ field }, { learned += $0 })
+
+        // Still typing: each state lasts less than the settle time.
+        for partial in ["edwardtapu.de", "edwardtapu.d", "edytapu.d"] {
+            field = "Push it to \(partial)"
+            try await Task.sleep(for: .milliseconds(300))
+        }
+        field = ""
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(learned.isEmpty)
+        watcher.stop()
     }
 }

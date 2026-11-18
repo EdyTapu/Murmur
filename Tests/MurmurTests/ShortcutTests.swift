@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import CoreAudio
 import Testing
 
 @testable import Murmur
@@ -61,4 +62,104 @@ import Testing
         #expect(AudioDevices.deviceID(forUID: "definitely-not-a-real-uid") == nil)
         #expect(AudioDevices.deviceID(forUID: "") == nil)
     }
+}
+
+// Serialized: both tests drive the one real microphone.
+@Suite(.serialized) struct AudioRecorderTests {
+    /// The recorder once went silent because of how it selected its device,
+    /// and nothing caught it. Opens the real microphone for about a second.
+    @Test func capturesAudioFromTheInputDevice() async throws {
+        guard AudioDevices.defaultInputDeviceID() != nil else { return }  // no microphone on this machine
+        let recorder = AudioRecorder()
+        await recorder.warmUp()
+        recorder.startCollecting(onEngineFailure: {})
+        try await Task.sleep(for: .milliseconds(1200))
+        let samples = recorder.stopCollecting()
+        #expect(samples.count > 8_000, "about a second was recorded, so at least half of it must arrive")
+
+        // The same must hold after the input device changed and the engine was rebuilt.
+        recorder.reconfigureInputDevice()
+        await recorder.warmUp()
+        recorder.startCollecting(onEngineFailure: {})
+        try await Task.sleep(for: .milliseconds(1200))
+        #expect(recorder.stopCollecting().count > 8_000)
+    }
+
+    /// Connecting a display or headphones changes the microphone's sample rate
+    /// while Murmur sits idle. The engine then refused to start ("Couldn't
+    /// start the microphone"). Flips the real device's rate and restores it.
+    @Test func keepsCapturingAfterTheSampleRateChanges() async throws {
+        guard let device = AudioDevices.defaultInputDeviceID(), let original = AudioDevices.sampleRate(of: device)
+        else { return }
+        func setRate(_ rate: Double) -> Bool {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyNominalSampleRate,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            var value = rate
+            return AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<Float64>.size), &value) == noErr
+        }
+        let other: Double = original == 48_000 ? 44_100 : 48_000
+        let recorder = AudioRecorder()
+        await recorder.warmUp()
+        guard setRate(other) else { return }  // a microphone with a single fixed rate
+        defer { _ = setRate(original) }
+        try await Task.sleep(for: .milliseconds(700))
+
+        let failed = Flag()
+        recorder.startCollecting(onEngineFailure: { failed.set() })
+        try await Task.sleep(for: .milliseconds(1500))
+        let samples = recorder.stopCollecting()
+        #expect(!failed.value, "the engine must start after a rate change")
+        #expect(samples.count > 8_000)
+    }
+}
+
+extension AudioRecorderTests {
+    /// Connecting headphones makes them the Mac's output device, which
+    /// reconfigures the engine (its I/O unit spans input and output) while
+    /// Murmur sits idle. Dictation then stopped working. Switches the real
+    /// default output to another device and back.
+    @Test func keepsCapturingAfterTheOutputDeviceChanges() async throws {
+        guard AudioDevices.defaultInputDeviceID() != nil, let original = AudioDevices.defaultOutputDeviceID()
+        else { return }
+        let recorder = AudioRecorder()
+        await recorder.warmUp()
+        // Headphones run at their own rate (Bluetooth: 44.1 kHz or lower), so prefer a device that differs.
+        let rate = AudioDevices.sampleRate(of: original)
+        let candidates = AudioDevices.outputDeviceIDs().filter { $0 != original }
+            .sorted { (AudioDevices.sampleRate(of: $0) != rate ? 0 : 1) < (AudioDevices.sampleRate(of: $1) != rate ? 0 : 1) }
+        // Some devices (virtual ones) refuse to become the default output.
+        guard candidates.contains(where: { AudioDevices.setDefaultOutput($0) && AudioDevices.defaultOutputDeviceID() == $0 })
+        else { return }  // needs a second output device
+        defer { _ = AudioDevices.setDefaultOutput(original) }
+        try await Task.sleep(for: .milliseconds(1000))
+
+        let failed = Flag()
+        recorder.startCollecting(onEngineFailure: { failed.set() })
+        try await Task.sleep(for: .milliseconds(1500))
+        let samples = recorder.stopCollecting()
+        #expect(!failed.value, "the engine must start after the output device changed")
+        #expect(samples.count > 8_000)
+    }
+}
+
+private extension AudioDevices {
+    static func setDefaultOutput(_ device: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value = device
+        return AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size), &value) == noErr
+    }
+}
+
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+    var value: Bool { lock.withLock { raised } }
+    func set() { lock.withLock { raised = true } }
 }

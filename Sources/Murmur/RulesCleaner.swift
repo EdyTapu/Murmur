@@ -20,7 +20,7 @@ enum RulesCleaner {
         "scratch that", "cancel", "cancel that", "never mind", "nevermind",
     ]
 
-    static func clean(_ raw: String, removeFillers: Bool) -> Output {
+    static func clean(_ raw: String, removeFillers: Bool, spokenPunctuation: Bool = true) -> Output {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return Output(text: "") }
 
@@ -36,10 +36,15 @@ enum RulesCleaner {
             return Output(text: "", cancelled: true)
         }
 
+        // Mid-utterance self-corrections ("at 2, actually 3").
+        text = Backtrack.apply(text)
+
         if removeFillers {
             text = text.replacingOccurrences(
                 of: fillerPattern, with: "", options: .regularExpression)
         }
+        text = CodeCase.apply(text)
+        if spokenPunctuation { text = SpokenPunctuation.apply(text) }
 
         // Trailing "new line" / "new paragraph" commands.
         var trailingNewlines = 0
@@ -56,7 +61,8 @@ enum RulesCleaner {
             }
         }
 
-        text = repairWhitespace(text)
+        // Lists go last: they add line breaks that whitespace repair would flatten.
+        text = ListFormatter.apply(repairWhitespace(text))
         return Output(text: text, cancelled: false, trailingNewlines: trailingNewlines)
     }
 
