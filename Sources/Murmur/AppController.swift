@@ -68,8 +68,22 @@ final class AppController: ObservableObject {
         // sample rate after a display or headphones connect.
         NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main
+        ) { [weak self] note in
+            let source = (note.object as AnyObject?).map(ObjectIdentifier.init)
+            MainActor.assumeIsolated {
+                // Engines that were already replaced post these too; only the live one counts.
+                guard let self, self.recorder.noteConfigurationChange(from: source) else { return }
+                self.applyMicSelection()
+            }
+        }
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.applyMicSelection() }
+            MainActor.assumeIsolated {
+                guard let self, case .recording = self.state else { return }
+                self.retarget()
+            }
         }
 
         recorder.onLevel = { [weak self] level in
@@ -131,6 +145,7 @@ final class AppController: ObservableObject {
 
     private var shortcutIDs: [UInt32] = []
     private var micChangeTask: Task<Void, Never>?
+    private var micRefreshRequested = false
 
     /// (Re-)register every user-recorded shortcut from Prefs.
     func restartShortcuts() {
@@ -168,6 +183,11 @@ final class AppController: ObservableObject {
     func applyMicSelection() {
         micChangeTask?.cancel()
         micChangeTask = Task { [weak self] in
+            // Connecting headphones is a burst of device changes; a Bluetooth
+            // headset's last one was measured up to 2.3 s after the rest. An
+            // engine built in the middle ends up dead, or its creation never
+            // returns (deadlock inside AVFAudio), so wait until it is quiet.
+            if self?.micRefreshRequested != true { try? await Task.sleep(for: .seconds(4)) }
             while let self, self.state != .idle {
                 try? await Task.sleep(for: .milliseconds(200))
                 if Task.isCancelled { return }
@@ -176,10 +196,27 @@ final class AppController: ObservableObject {
             AudioDevices.enforcePreferredInput()
             // Only when something really changed: a rebuild can itself post a
             // configuration change, and an unconditional one would loop.
-            guard self.recorder.isStale else { return }
-            self.recorder.reconfigureInputDevice()
-            if self.micGranted { await self.recorder.warmUp() }
+            guard self.micGranted, self.recorder.isStale || self.micRefreshRequested else { return }
+            let delivered = await self.recorder.rebuild()
+            // Cancelled means a newer change took over; that run reports instead.
+            guard self.micRefreshRequested, !Task.isCancelled else { return }
+            self.micRefreshRequested = false
+            self.hud.showResult(
+                success: delivered,
+                message: delivered ? "Microphone ready" : "No sound from the microphone",
+                autoHideAfter: 2.2)
         }
+    }
+
+    /// The "Refresh Microphone" button: rebuild the audio engine on the Mac's
+    /// current devices whether or not Murmur noticed a change.
+    func refreshMicrophone() {
+        guard micGranted else {
+            hud.showResult(success: false, message: "Grant microphone access in Murmur settings")
+            return
+        }
+        micRefreshRequested = true
+        applyMicSelection()
     }
 
     private func loadModels() async {
@@ -329,13 +366,7 @@ final class AppController: ObservableObject {
         // Commit what the last dictation's field taught us before this one is cleaned.
         corrections.stop()
         dictionary.reloadIfChanged()
-        let target = insertion.captureContext()
-        capturedContext = target
-        // Read what is on screen while the user talks; it is ready by the time they stop.
-        screenText = nil
-        if Prefs.contextAwareness, let pid = target.appPID {
-            screenText = Task.detached { ContextVocabulary.visibleText(pid: pid) }
-        }
+        retarget()
         // The engine restart (if paused) happens off-main inside the recorder;
         // failure is rare and surfaces here asynchronously.
         recorder.startCollecting(onEngineFailure: { [weak self] in
@@ -348,7 +379,6 @@ final class AppController: ObservableObject {
 
         state = .recording(handsFree: handsFree)
         hud.model.isCommand = commandMode
-        hud.model.targetApp = target.appName
         hud.show(.recording(handsFree: handsFree))
         playSound("Tink")
         if Prefs.muteWhileDictating {
@@ -361,6 +391,20 @@ final class AppController: ObservableObject {
         }
         startPartialsLoop()
         startSilenceWatch()
+    }
+
+    /// Aim the dictation at the app in front: its name on the bar, its tone,
+    /// its on-screen names. Text lands wherever the user is when they stop, so
+    /// this runs again each time they switch apps while talking.
+    private func retarget() {
+        let target = insertion.captureContext()
+        capturedContext = target
+        hud.model.targetApp = target.appName
+        // Read what is on screen while the user talks; it is ready by the time they stop.
+        screenText = nil
+        if Prefs.contextAwareness, let pid = target.appPID {
+            screenText = Task.detached { ContextVocabulary.visibleText(pid: pid) }
+        }
     }
 
     private var modelNotReadyMessage: String {

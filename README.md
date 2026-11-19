@@ -12,16 +12,28 @@ Inspired by Wispr Flow, built from scratch in Swift.
 - About 1 GB of free disk space, and an internet connection for the first launch.
   Murmur downloads the Parakeet speech model (roughly 600 MB) once, then works offline.
 
-## Build and run
+## Download and install
 
-```
-git clone https://github.com/EdyTapu/Murmur.git
-cd Murmur
-ALLOW_ADHOC=1 zsh app/launch.sh
-```
+There is no prebuilt download yet, so you build Murmur from source.
+It is one command, and it needs no Xcode project or extra tools.
+
+1. Install Xcode 26 or newer from the App Store, and open it once so it finishes installing its components.
+2. Get the code.
+   With git:
+   ```
+   git clone https://github.com/EdyTapu/Murmur.git
+   cd Murmur
+   ```
+   Without git: on the [GitHub page](https://github.com/EdyTapu/Murmur) choose **Code → Download ZIP**, unzip it, then open Terminal and `cd` into the unzipped folder.
+3. Build and launch:
+   ```
+   ALLOW_ADHOC=1 zsh app/launch.sh
+   ```
 
 The first build takes a few minutes because it compiles the speech engine.
 The app lands in `build/Murmur.app` and shows up as a waveform icon in the menu bar.
+To start it again later, run `open build/Murmur.app`, or turn on "Launch at login" in Murmur's settings.
+To update, run `git pull` and then `ALLOW_ADHOC=1 zsh app/launch.sh --rebuild`.
 
 `ALLOW_ADHOC=1` tells the build to use a throwaway signature instead of the author's signing certificate, which you do not have.
 Without it the build stops with a "signing identity not found" error.
@@ -40,10 +52,27 @@ See [Stable signing](#stable-signing-optional) if you plan to rebuild often.
 - **Hold fn** and speak, then release to insert the text.
 - **Quick-tap fn** for hands-free dictation, and tap again or go silent to stop.
 - Say **"scratch that"** to cancel a dictation.
-- Open the app (or click the menu bar icon) for the dashboard: history, scratchpad, personal dictionary, snippets, and settings.
+- The text goes to whichever app is in front when you stop.
+  The dictation bar shows that app's name and follows you if you switch apps while talking.
+- Open the app (or click the menu bar icon) for the dashboard: history, scratchpad, personal dictionary, snippets, transforms, and settings.
 - The dictation key can be changed to right ⌘ or right ⌥ in Settings, and you can record a separate shortcut for hands-free mode.
-- "AI polish" is an optional on-device cleanup pass that uses Apple Intelligence.
-  It is off by default.
+
+### More features
+
+- **Cleanup levels:** None, Light, or Medium.
+  Light removes filler words, keeps only your correction ("at 2, actually 3"), and turns spoken lists and punctuation into real ones.
+  Medium adds an on-device rewrite pass.
+- **Code words:** say "snake case user id" or "camel case get user name".
+  Murmur also reads the names visible in the app you dictate into and spells them the same way.
+- **Command Mode:** hold ⌃ with the dictation key and say what to do with the selected text ("make this more formal"), or "search for …" to open a web search.
+- **Transforms:** saved rewrites that you apply to selected text from a shortcut.
+- **Learning:** retype a word Murmur got wrong and it adds the fix to your dictionary.
+- **Scratchpad:** tabbed notes that open from any app with ⌥S.
+- **Microphones:** rank your microphones in Settings.
+  Murmur never uses a Bluetooth headset's microphone unless you add it, so your headphones keep full audio quality.
+- **Mute while dictating:** other audio is muted while you record.
+
+Medium cleanup, Command Mode, and Transforms use Apple Intelligence, so they need a Mac that has it turned on.
 
 ### Head control (experimental)
 
@@ -76,6 +105,8 @@ To make grants survive rebuilds, create a signing certificate once:
   tccutil reset Accessibility com.alessio.murmur
   tccutil reset Microphone com.alessio.murmur
   ```
+- **Dictation hears nothing after connecting headphones:** choose "Refresh Microphone" in the menu bar menu or in Settings.
+  Murmur reconnects to the microphone and tells you whether sound arrives.
 - **Text does not appear in password fields:** this is deliberate, Murmur refuses secure input fields.
 
 ## Development

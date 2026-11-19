@@ -11,6 +11,9 @@ struct MenuContent: View {
                 controller.toggleHandsFree()
             }
             .disabled(!controller.isReady && !isRecording)
+            Button("Refresh Microphone") {
+                controller.refreshMicrophone()
+            }
             Divider()
             Button(gazeTitle) {
                 controller.gaze.toggle()

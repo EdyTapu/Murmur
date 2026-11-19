@@ -84,12 +84,16 @@ struct GeneralSettings: View {
                         }
                         .buttonStyle(.borderless)
                     }
-                    Menu(micPriority.isEmpty ? "System default" : "Add microphone") {
-                        ForEach(inputDevices.filter { device in !micPriority.contains { $0.uid == device.uid } }) { device in
-                            Button(device.label) { micPriority.append(device) }
+                    HStack {
+                        Menu(micPriority.isEmpty ? "System default" : "Add microphone") {
+                            ForEach(inputDevices.filter { device in !micPriority.contains { $0.uid == device.uid } }) { device in
+                                Button(device.label) { micPriority.append(device) }
+                            }
                         }
+                        .fixedSize()
+                        Button("Refresh Microphone") { controller.refreshMicrophone() }
+                            .help("Reconnect Murmur to the microphone, for example after connecting headphones.")
                     }
-                    .fixedSize()
                 }
             }
             .onChange(of: micPriority) {

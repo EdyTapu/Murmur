@@ -142,6 +142,37 @@ extension AudioRecorderTests {
         #expect(!failed.value, "the engine must start after the output device changed")
         #expect(samples.count > 8_000)
     }
+
+    /// A connecting headset flips the Mac's devices and settles within a
+    /// second, back on the ones the engine was built for. Nothing looks
+    /// changed afterwards, yet the engine is dead: only its own
+    /// configuration-change notification says so. Switches the real default
+    /// output to another device and straight back.
+    @Test func keepsCapturingAfterTheOutputDeviceFlipsAndReturns() async throws {
+        guard AudioDevices.defaultInputDeviceID() != nil, let original = AudioDevices.defaultOutputDeviceID()
+        else { return }
+        let recorder = AudioRecorder()
+        let observer = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil
+        ) { note in
+            _ = recorder.noteConfigurationChange(from: (note.object as AnyObject?).map(ObjectIdentifier.init))
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        await recorder.warmUp()
+        let candidates = AudioDevices.outputDeviceIDs().filter { $0 != original }
+        guard candidates.contains(where: { AudioDevices.setDefaultOutput($0) && AudioDevices.defaultOutputDeviceID() == $0 })
+        else { return }  // needs a second output device
+        try await Task.sleep(for: .milliseconds(300))
+        _ = AudioDevices.setDefaultOutput(original)
+        // As long as the app waits: rebuilding while the devices still settle can hang inside AVFAudio.
+        try await Task.sleep(for: .milliseconds(4500))
+
+        #expect(recorder.isStale, "the engine's own notification must mark it stale")
+        #expect(await recorder.rebuild(), "the rebuilt engine must deliver audio")
+        recorder.startCollecting(onEngineFailure: {})
+        try await Task.sleep(for: .milliseconds(1500))
+        #expect(recorder.stopCollecting().count > 8_000)
+    }
 }
 
 private extension AudioDevices {

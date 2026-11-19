@@ -29,7 +29,7 @@ final class HotkeyMonitor {
         stop()
         self.choice = choice
         // DispatchQueue.main (not Task) so rapid down/up events stay FIFO.
-        let thread = HotkeyTapThread(choice: choice) { down in
+        let thread = HotkeyTapThread(choice: choice) { [weak self] down in
             DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self else { return }

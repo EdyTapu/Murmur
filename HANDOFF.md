@@ -59,6 +59,13 @@ Pipeline: hotkey → record → transcribe → clean → insert → history.
     Transforms are saved prompts (`DictionaryStore.transforms`) run on the selection from a recordable shortcut that pops up a menu.
   - `ShortcutAction` (toggle / transform / scratchpad) - all recordable shortcuts go through `AppController.restartShortcuts`; scratchpad defaults to ⌥S.
   - Microphones - `Prefs.micPriority` is a ranked list; `AudioDevices.chooseInput` picks the first connected one and otherwise the system default, but never an unranked Bluetooth headset (opening its mic drops the headphones into the low-quality call profile). The device is re-resolved at every `startCollecting`.
+    The engine's input format comes from a private aggregate of the default input and output, so it follows the output device too (48 kHz mic, but a 44.1 kHz tap with Bluetooth headphones).
+    An engine built while a connecting headset is still in its call profile goes dead once the headset settles: it starts but delivers no buffers, and the device IDs and the mic's own sample rate look unchanged.
+    So `AppController.applyMicSelection` waits 4 s for the burst of device changes to end (the last Bluetooth change was measured up to 2.3 s after the others), `AudioRecorder.noteConfigurationChange` marks the live engine stale when it posts `AVAudioEngineConfigurationChange`, and `AudioRecorder.rebuild` retries until the warm-up really receives buffers.
+    "Refresh Microphone" (menu bar menu and Settings) forces the same rebuild and reports whether audio arrived.
+    Known limit: creating an engine while the aggregate is still changing can deadlock inside AVFAudio for good (sampled: `-[AVAudioEngine inputNode]` spins in `AVAudioIOUnit_OSX::_GetHWFormat` while `IOUnitConfigurationChanged` waits for the engine mutex).
+    The 4 s wait is what keeps the rebuild clear of that; `startCollecting` still rebuilds at once when a dictation starts inside the wait.
+  - Dictation target - text is inserted into whatever is focused when the dictation ends, so `AppController.retarget` re-captures the frontmost app (bar label, tone, on-screen vocabulary, history entry) on every `NSWorkspace.didActivateApplicationNotification` while recording.
   - `OutputMuter` mutes the default output while recording and only undoes its own mute.
   - `StatsStore` - per-day totals in `stats.json`, backfilled from history once, so insights survive the history cap and `Prefs.historyRetention` (forever / 24 h / never).
   - Sync - `Prefs.syncFolder` relocates `dictionary.json` (terms, snippets, transforms); `reloadIfChanged` runs before each dictation, last writer wins.

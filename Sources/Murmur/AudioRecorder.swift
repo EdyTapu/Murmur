@@ -40,9 +40,27 @@ final class AudioRecorder: @unchecked Sendable {
     private var tapOutputDevice: AudioDeviceID?
     private var tapSampleRate: Double = 0
 
-    /// True when the Mac's input or output device, or the input's sample rate, changed since the tap was installed.
+    /// Set when the engine reports that its hardware configuration changed.
+    /// From then on it starts but delivers no audio, even with the same
+    /// devices and sample rate: connecting headphones rebuilds the engine while
+    /// they are still in their call profile, and they switch to stereo after.
+    private var configurationChanged = false
+    /// Buffers the tap has received; tells a live microphone from a dead engine.
+    private var tapCount = 0
+
+    /// Record an `AVAudioEngineConfigurationChange`. False when it came from
+    /// an engine that was already replaced.
+    func noteConfigurationChange(from source: ObjectIdentifier?) -> Bool {
+        guard source == ObjectIdentifier(engine) else { return false }
+        configurationChanged = true
+        return true
+    }
+
+    /// True when the engine's configuration, the Mac's input or output device, or the input's sample rate changed since the tap was installed.
     var isStale: Bool {
-        guard tapInstalled, let device = AudioDevices.defaultInputDeviceID() else { return false }
+        guard tapInstalled else { return false }
+        if configurationChanged { return true }
+        guard let device = AudioDevices.defaultInputDeviceID() else { return false }
         return device != tapDevice || AudioDevices.sampleRate(of: device) != tapSampleRate
             || AudioDevices.defaultOutputDeviceID() != tapOutputDevice
     }
@@ -77,22 +95,51 @@ final class AudioRecorder: @unchecked Sendable {
             tapInstalled = false
         }
         engine = AVAudioEngine()
+        configurationChanged = false
         prepare()
+    }
+
+    /// Start over on the Mac's current devices and check that audio arrives.
+    /// An engine built while a connecting headset is still switching profiles
+    /// can come up dead, so this tries up to three times. Call while idle.
+    func rebuild() async -> Bool {
+        for attempt in 1...3 {
+            // A dictation that started meanwhile owns the engine now.
+            guard !Task.isCancelled, !isCollecting else { break }
+            reconfigureInputDevice()
+            if await warmUp() { return true }
+            log.notice("Rebuilt audio engine delivered no audio (attempt \(attempt, privacy: .public))")
+            try? await Task.sleep(for: .seconds(1))
+        }
+        return false
     }
 
     /// Spin the engine briefly so the audio unit is fully initialized, then pause.
     /// After this, `engine.start()` returns in a few ms.
-    func warmUp() async {
+    /// Returns whether the microphone delivered audio meanwhile.
+    @discardableResult
+    func warmUp() async -> Bool {
         prepare()
-        guard tapInstalled else { return }
+        guard tapInstalled else { return false }
         do {
+            let before = buffersReceived
             try engine.start()
             try? await Task.sleep(for: .milliseconds(400))
-            engine.pause()
-            log.info("Audio engine warmed up")
+            // Not a plain pause: a dictation may have started during the warm-up.
+            pauseIfIdle()
+            let delivered = buffersReceived != before
+            log.notice("Audio engine warmed up; microphone delivered audio: \(delivered, privacy: .public)")
+            return delivered
         } catch {
             log.error("Audio warm-up failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
+    }
+
+    private var buffersReceived: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return tapCount
     }
 
     // MARK: - Recording
@@ -156,11 +203,14 @@ final class AudioRecorder: @unchecked Sendable {
         return Self.samples16k(from: captured)
     }
 
-    private func pauseIfIdle() {
+    private var isCollecting: Bool {
         lock.lock()
-        let stillIdle = !collecting
-        lock.unlock()
-        if stillIdle, engine.isRunning {
+        defer { lock.unlock() }
+        return collecting
+    }
+
+    private func pauseIfIdle() {
+        if !isCollecting, engine.isRunning {
             engine.pause()
             log.info("Audio engine paused after idle grace period")
         }
@@ -208,6 +258,7 @@ final class AudioRecorder: @unchecked Sendable {
 
     private func handleTap(_ buffer: AVAudioPCMBuffer) {
         lock.lock()
+        tapCount += 1
         let isCollecting = collecting
         lock.unlock()
         guard isCollecting else { return }
