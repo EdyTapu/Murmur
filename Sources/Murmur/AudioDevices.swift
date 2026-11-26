@@ -61,6 +61,11 @@ enum AudioDevices {
     @discardableResult
     static func enforcePreferredInput() -> Bool {
         let systemDefault = defaultInputDeviceID()
+        // Another app (FaceTime, Zoom) is recording from it: the headset is
+        // already in its call profile, and moving the default away tears that
+        // down mid-call and silences the headphones. Dictation records from
+        // the headset instead, and `OutputMuter` pauses the call's sound meanwhile.
+        if let systemDefault, isRunningSomewhere(systemDefault) { return false }
         guard
             let chosen = chooseInput(
                 ranked: Prefs.micPriority.map(\.uid), connected: inputDevices(),
@@ -126,6 +131,16 @@ enum AudioDevices {
     }
 
     // MARK: - Internals
+
+    static func isRunningSomewhere(_ device: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var running: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(device, &address, 0, nil, &size, &running) == noErr && running != 0
+    }
 
     private static func allDeviceIDs() -> [AudioDeviceID] {
         var address = AudioObjectPropertyAddress(

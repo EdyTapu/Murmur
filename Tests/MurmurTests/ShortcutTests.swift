@@ -1,3 +1,4 @@
+import AVFoundation
 import AppKit
 import Foundation
 import CoreAudio
@@ -175,10 +176,76 @@ extension AudioRecorderTests {
     }
 }
 
+extension AudioRecorderTests {
+    /// Dictating during a FaceTime call on a Bluetooth headset. Murmur used to
+    /// move the Mac's input off the headset mic, which tore down the call's
+    /// audio and left the headphones silent. Now the call keeps its headset,
+    /// the dictation records from it, and the headphones are muted only while
+    /// dictating. Needs a connected Bluetooth headset; the "call" is an engine
+    /// on its microphone.
+    @Test func dictationDuringACallKeepsTheHeadsetAndOnlyPausesItsSound() async throws {
+        guard let original = AudioDevices.defaultInputDeviceID(),
+            let headset = AudioDevices.inputDevices().first(where: { $0.transport == .bluetooth })
+                .flatMap({ AudioDevices.deviceID(forUID: $0.uid) })
+        else { return }  // needs a Bluetooth headset
+        defer { _ = AudioDevices.setDefaultInput(original) }
+        guard AudioDevices.setDefaultInput(headset) else { return }
+        try await Task.sleep(for: .milliseconds(1500))
+
+        let call = AVAudioEngine()
+        let format = call.inputNode.outputFormat(forBus: 0)
+        call.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { _, _ in }
+        try call.start()
+        defer { call.stop() }
+        try await Task.sleep(for: .milliseconds(2500))  // the headset switches to its call profile
+
+        #expect(AudioDevices.isRunningSomewhere(headset))
+        #expect(!AudioDevices.enforcePreferredInput(), "the call keeps its headset microphone")
+        #expect(AudioDevices.defaultInputDeviceID() == headset)
+
+        let recorder = AudioRecorder()
+        await recorder.warmUp()
+        let muter = await OutputMuter()
+        let failed = Flag()
+        recorder.startCollecting(onEngineFailure: { failed.set() })
+        await muter.mute()
+        let output = try #require(AudioDevices.defaultOutputDeviceID())
+        #expect(isMuted(output) == true, "the call's sound pauses while dictating")
+        // Long enough to pass the moment a headset that changes profile kills the engine (measured at 2.4 s).
+        try await Task.sleep(for: .milliseconds(4000))
+        let samples = recorder.stopCollecting()
+        await muter.restore()
+        #expect(isMuted(output) == false, "and comes back when the dictation ends")
+        #expect(!failed.value)
+        #expect(samples.count > 16_000 * 3, "the whole dictation is recorded from the headset")
+    }
+
+    private func isMuted(_ device: AudioDeviceID) -> Bool? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyMute, mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr else { return nil }
+        return value != 0
+    }
+}
+
 private extension AudioDevices {
     static func setDefaultOutput(_ device: AudioDeviceID) -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value = device
+        return AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size), &value) == noErr
+    }
+
+    static func setDefaultInput(_ device: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var value = device
